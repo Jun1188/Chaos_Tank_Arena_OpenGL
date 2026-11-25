@@ -1,4 +1,4 @@
-# Created by https://www.toptal.com/developers/gitignore/api/windows,visualstudio,c++
+﻿# Created by https://www.toptal.com/developers/gitignore/api/windows,visualstudio,c++
 # Edit at https://www.toptal.com/developers/gitignore?templates=windows,visualstudio,c++
 
 ### C++ ###
@@ -456,3 +456,19 @@ FodyWeavers.xsd
 # Additional files built by Visual Studio
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,visualstudio,c++
+
+# Chaos Tank Arena: Drive packages and local-only resources
+/framework/local/
+*.zip
+/build/
+
+# Team-authored Wavefront meshes (compiled .obj files elsewhere stay ignored)
+!/assets/**/*.obj
+/assets/local/
+
+# Personal agent instructions and workspaces
+AGENTS.md
+CLAUDE.md
+/.agents/
+/.codex/
+/.claude/

@@ -1,0 +1,8 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- 박재성 담당. 새 파일은 다음 형식으로 이 ItemGroup에 등록한다.
+       <ClCompile Include="$(MSBuildThisFileDirectory)Example.cpp" />
+       <ClInclude Include="$(MSBuildThisFileDirectory)Example.h" />
+  -->
+  <ItemGroup />
+</Project>
