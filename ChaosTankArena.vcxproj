@@ -1,0 +1,66 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{CFEE9BF3-2231-41C3-A30A-D4CE5441F9D5}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <ArenaFrameworkDir>$(ProjectDir)framework\local\ComputerGraphics\ComputerGraphics\</ArenaFrameworkDir>
+    <OutDir>$(ProjectDir)build\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(OutDir)obj\</IntDir>
+    <LocalDebuggerWorkingDirectory>$(ProjectDir)</LocalDebuggerWorkingDirectory>
+    <AssimpLibrary>assimp-vc145-mt</AssimpLibrary>
+    <AssimpLibrary Condition="'$(Configuration)'=='Debug'">assimp-vc145-mtd</AssimpLibrary>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <WarningLevel>Level3</WarningLevel>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ArenaFrameworkDir)include;$(ArenaFrameworkDir)include\vendor;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalLibraryDirectories>$(ArenaFrameworkDir)lib\$(Platform)\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>glfw3.lib;glew32.lib;$(AssimpLibrary).lib;opengl32.lib;winmm.lib;gdi32.lib;user32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Animation.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Camera.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Mesh.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Model.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Object.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Shader.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Timeline.cpp" />
+    <ClCompile Include="$(ArenaFrameworkDir)src\Transform.cpp" />
+    <FrameworkDll Include="$(ArenaFrameworkDir)glew32.dll;$(ArenaFrameworkDir)$(AssimpLibrary).dll" />
+  </ItemGroup>
+  <Import Project="src\game\Sources.props" />
+  <Import Project="src\render\Sources.props" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyFrameworkDlls" AfterTargets="Build">
+    <Copy SourceFiles="@(FrameworkDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
