@@ -44,6 +44,9 @@
       <AdditionalLibraryDirectories>$(ArenaFrameworkDir)lib\$(Platform)\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>glfw3.lib;glew32.lib;$(AssimpLibrary).lib;opengl32.lib;winmm.lib;gdi32.lib;user32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <Manifest>
+      <AdditionalManifestFiles>$(ProjectDir)src\utf8.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
@@ -59,6 +62,7 @@
   </ItemGroup>
   <Import Project="src\game\Sources.props" />
   <Import Project="src\render\Sources.props" />
+  <Import Project="src\tmpBoxing\Sources.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyFrameworkDlls" AfterTargets="Build">
     <Copy SourceFiles="@(FrameworkDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />

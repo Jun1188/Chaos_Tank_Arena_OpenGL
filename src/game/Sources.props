@@ -4,5 +4,14 @@
        <ClCompile Include="$(MSBuildThisFileDirectory)Example.cpp" />
        <ClInclude Include="$(MSBuildThisFileDirectory)Example.h" />
   -->
-  <ItemGroup />
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)ArenaScene.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)Physics.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)TankEntity.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)TimeManager.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)ArenaScene.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)Physics.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)TankEntity.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)TimeManager.h" />
+  </ItemGroup>
 </Project>

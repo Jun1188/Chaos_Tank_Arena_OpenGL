@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- 전체 플레이 루프 검증 및 임시 박싱용 스크립트. 본 구현 통합 후 교체·정리한다. -->
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)AssetPath.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)PreviewRenderer.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)SandTankModel.cpp" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)AssetPath.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)PreviewRenderer.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)SandTankModel.h" />
+  </ItemGroup>
+</Project>
