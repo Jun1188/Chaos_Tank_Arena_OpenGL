@@ -39,16 +39,22 @@ glm::mat4 makePartDrawMatrix(const glm::mat4& partWorld, const glm::vec3& localO
     return partWorld * offset * scale;
 }
 
-bool overlapsSolidObstacleXZ(float x, float z, float bodyRadius, std::span<const OBB> obstacles)
+void resolveObstaclePenetrationXZ(float& x, float& z, float bodyRadius, std::span<const OBB> obstacles)
 {
     for (const OBB& box : obstacles)
     {
-        const float dx = std::abs(x - box.center.x);
-        const float dz = std::abs(z - box.center.z);
-        if (dx < box.halfExtents.x + bodyRadius && dz < box.halfExtents.z + bodyRadius)
-            return true;
+        const float dx = x - box.center.x;
+        const float dz = z - box.center.z;
+        const float penX = (box.halfExtents.x + bodyRadius) - std::abs(dx);
+        const float penZ = (box.halfExtents.z + bodyRadius) - std::abs(dz);
+        if (penX > 0.0f && penZ > 0.0f)
+        {
+            if (penX < penZ)
+                x += (dx >= 0.0f ? penX : -penX);
+            else
+                z += (dz >= 0.0f ? penZ : -penZ);
+        }
     }
-    return false;
 }
 } // namespace
 
@@ -100,6 +106,7 @@ void TankEntity::reset(EntityId id, const glm::vec3& groundPos, float bodyYawRad
     curr_.bodyPitch = 0.0f;
     curr_.bodyRot = buildBodyRotation(curr_.bodyYaw, curr_.bodyPitch);
     curr_.velocity = glm::vec3{0.0f};
+    curr_.angularVel = glm::vec3{0.0f};
     curr_.turretYaw = 0.0f;
     curr_.barrelPitch = 0.0f;
     curr_.airborne = false;
@@ -121,6 +128,98 @@ float TankEntity::heightAboveGround(const RampSurface* ramp) const
 {
     const float surfaceY = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
     return std::max(0.0f, curr_.bodyPos.y - surfaceY);
+}
+
+glm::vec3 TankEntity::interpolatedPosition(float alpha) const
+{
+    return glm::mix(prev_.bodyPos, curr_.bodyPos, std::clamp(alpha, 0.0f, 1.0f));
+}
+
+glm::vec3 TankEntity::interpolatedForwardXZ(float alpha) const
+{
+    const float yaw = lerpAngle(prev_.bodyYaw, curr_.bodyYaw, std::clamp(alpha, 0.0f, 1.0f));
+    return glm::vec3{-std::sin(yaw), 0.0f, -std::cos(yaw)};
+}
+
+void TankEntity::triggerExplosionJump(const glm::vec3& horizontalDirXZ)
+{
+    if (!alive())
+        return;
+
+    glm::vec3 baseDir{horizontalDirXZ.x, 0.0f, horizontalDirXZ.z};
+    const float len = glm::length(baseDir);
+    if (len > 1e-4f)
+        baseDir /= len;
+    else
+        baseDir = glm::vec3{-std::sin(curr_.bodyYaw), 0.0f, -std::cos(curr_.bodyYaw)};
+
+    std::uniform_real_distribution<float> angleJitterDist(-0.95f, 0.95f);
+    std::uniform_real_distribution<float> horizSpeedDist(4.5f, 10.5f);
+    std::uniform_real_distribution<float> upSpeedDist(13.5f, 18.5f);
+    std::uniform_real_distribution<float> pitchSpinDist(5.5f, 11.5f);
+    std::uniform_real_distribution<float> yawSpinDist(-7.5f, 7.5f);
+    std::uniform_real_distribution<float> rollSpinDist(5.0f, 10.5f);
+    std::uniform_int_distribution<int> signDist(0, 1);
+
+    const float jitter = angleJitterDist(rng_);
+    const float c = std::cos(jitter);
+    const float s = std::sin(jitter);
+    const glm::vec3 launchDir{
+        baseDir.x * c - baseDir.z * s,
+        0.0f,
+        baseDir.x * s + baseDir.z * c};
+
+    const float pitchSign = signDist(rng_) == 0 ? 1.0f : -1.0f;
+    const float rollSign = signDist(rng_) == 0 ? 1.0f : -1.0f;
+
+    // TABS-style chaotic, exaggerated explosion launch and multi-axis tumble.
+    curr_.velocity = launchDir * horizSpeedDist(rng_) + glm::vec3{0.0f, upSpeedDist(rng_), 0.0f};
+    curr_.angularVel = glm::vec3{
+        pitchSign * pitchSpinDist(rng_),
+        yawSpinDist(rng_),
+        rollSign * rollSpinDist(rng_)};
+    curr_.airborne = true;
+    curr_.onRamp = false;
+    tookOffThisTick_ = true;
+}
+
+void TankEntity::applyFireRecoil(const glm::vec3& fireForward)
+{
+    if (!alive())
+        return;
+
+    glm::vec3 recoilDir = -fireForward;
+    const float len = glm::length(recoilDir);
+    recoilDir = (len > 1e-4f) ? (recoilDir / len) : glm::vec3{0.0f, 0.0f, 1.0f};
+
+    std::uniform_real_distribution<float> kickJitterDist(0.85f, 1.25f);
+    std::uniform_real_distribution<float> wobbleDist(-2.4f, 2.4f);
+    const float mult = kickJitterDist(rng_);
+
+    const glm::vec3 recoilHoriz{recoilDir.x, 0.0f, recoilDir.z};
+    const float horizLen = glm::length(recoilHoriz);
+    const glm::vec3 recoilXZ = (horizLen > 1e-4f) ? (recoilHoriz / horizLen) : glm::vec3{0.0f, 0.0f, 1.0f};
+
+    // World torque axis that pitches the nose upward / rocks the hull opposite to fire direction.
+    const glm::vec3 worldTorqueAxis = glm::cross(glm::vec3{0.0f, 1.0f, 0.0f}, recoilXZ);
+    const glm::vec3 localTorqueAxis = glm::inverse(curr_.bodyRot) * worldTorqueAxis;
+
+    if (curr_.airborne)
+    {
+        // Mid-air TABS trickshot cannon recoil: strong backward blast + comedic tumble spin.
+        curr_.velocity += recoilDir * (9.5f * mult) + glm::vec3{0.0f, 3.2f * mult, 0.0f};
+        curr_.angularVel += localTorqueAxis * (7.5f * mult) +
+                            glm::vec3{wobbleDist(rng_), wobbleDist(rng_) * 1.4f, wobbleDist(rng_)};
+    }
+    else
+    {
+        // Grounded TABS comic recoil: exaggerated backward kick + hop + nose-up rock.
+        curr_.velocity = recoilXZ * (7.2f * mult) + glm::vec3{0.0f, 3.8f * mult, 0.0f};
+        curr_.angularVel = localTorqueAxis * (5.2f * mult) +
+                           glm::vec3{wobbleDist(rng_) * 0.45f, wobbleDist(rng_) * 0.6f, wobbleDist(rng_) * 0.7f};
+        curr_.airborne = true;
+        curr_.onRamp = false;
+    }
 }
 
 void TankEntity::applyDrive(
@@ -160,24 +259,24 @@ void TankEntity::applyDrive(
         float nextZ = std::clamp(curr_.bodyPos.z + moveDirXZ.z * (spec_.moveSpeed * dt), -arenaHalfExtent, arenaHalfExtent);
 
         const float bodyRadius = std::min(spec_.bodyHalfExtents.x, spec_.bodyHalfExtents.z);
-        if (overlapsSolidObstacleXZ(nextX, nextZ, bodyRadius, solidObstacles))
-        {
-            nextX = curr_.bodyPos.x;
-            nextZ = curr_.bodyPos.z;
-        }
+        resolveObstaclePenetrationXZ(nextX, nextZ, bodyRadius, solidObstacles);
+        nextX = std::clamp(nextX, -arenaHalfExtent, arenaHalfExtent);
+        nextZ = std::clamp(nextZ, -arenaHalfExtent, arenaHalfExtent);
 
         const bool wasOnRamp = curr_.onRamp;
         const float prevSurfaceY = curr_.bodyPos.y;
-        const bool nextOnRamp = ramp && ramp->containsXZ(nextX, nextZ);
-        const float nextSurfaceY = ramp ? ramp->heightAt(nextX, nextZ) : 0.0f;
-
-        // Block climbing sheer side/back drop of ramp when approaching from flat ground.
-        if (!wasOnRamp && nextOnRamp && (nextSurfaceY - prevSurfaceY) > 0.65f)
+        if (!wasOnRamp && ramp)
         {
-            nextX = curr_.bodyPos.x;
-            nextZ = curr_.bodyPos.z;
+            const float tryXSurface = ramp->heightAt(nextX, curr_.bodyPos.z);
+            if (ramp->containsXZ(nextX, curr_.bodyPos.z) && (tryXSurface - prevSurfaceY) > 0.65f)
+                nextX = curr_.bodyPos.x;
+
+            const float tryZSurface = ramp->heightAt(nextX, nextZ);
+            if (ramp->containsXZ(nextX, nextZ) && (tryZSurface - prevSurfaceY) > 0.65f)
+                nextZ = curr_.bodyPos.z;
         }
 
+        const bool nextOnRamp = ramp && ramp->containsXZ(nextX, nextZ);
         const bool crossedLaunchLip =
             ramp && wasOnRamp &&
             ((nextZ < ramp->endZ && prevSurfaceY >= ramp->topHeight * 0.72f) ||
@@ -191,8 +290,9 @@ void TankEntity::applyDrive(
             const float horizSpeed = glm::length(horizVel);
             const float launchUp = std::max(horizSpeed * std::tan(ramp->slopePitchRad()) * 1.65f, 6.4f);
 
-            curr_.bodyPos = glm::vec3{nextX, prevSurfaceY + 0.04f, nextZ};
+            curr_.bodyPos = glm::vec3{nextX, prevSurfaceY + 0.02f, nextZ};
             curr_.velocity = glm::vec3{horizVel.x, launchUp, horizVel.z};
+            curr_.angularVel = glm::vec3{0.8f, 0.0f, 0.0f};
             curr_.airborne = true;
             curr_.onRamp = false;
             tookOffThisTick_ = true;
@@ -204,19 +304,16 @@ void TankEntity::applyDrive(
             curr_.bodyPos = glm::vec3{nextX, finalY, nextZ};
             curr_.onRamp = finalOnRamp;
             curr_.velocity = (dt > 1e-6f) ? (curr_.bodyPos - previousPos) / dt : glm::vec3{0.0f};
+            curr_.angularVel = glm::vec3{0.0f};
 
-            if (finalOnRamp)
-            {
-                const float climbAlign = glm::dot(forwardXZ, glm::vec3{0.0f, 0.0f, -1.0f});
-                curr_.bodyPitch = ramp->slopePitchRad() * climbAlign;
-            }
-            else
-            {
-                curr_.bodyPitch = 0.0f;
-            }
+            const float targetPitch = finalOnRamp
+                ? (ramp->slopePitchRad() * glm::dot(forwardXZ, glm::vec3{0.0f, 0.0f, -1.0f}))
+                : 0.0f;
+            curr_.bodyPitch += (targetPitch - curr_.bodyPitch) * std::clamp(dt * 14.0f, 0.0f, 1.0f);
+
+            const glm::quat targetRot = buildBodyRotation(curr_.bodyYaw, curr_.bodyPitch);
+            curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, targetRot, std::clamp(dt * 14.0f, 0.0f, 1.0f)));
         }
-
-        curr_.bodyRot = buildBodyRotation(curr_.bodyYaw, curr_.bodyPitch);
 
         const float travel = glm::dot(curr_.bodyPos - previousPos, forwardXZ);
         const float turnTravel = wrapAnglePi(curr_.bodyYaw - previousYaw) * spec_.trackHalfSpacing;
@@ -225,7 +322,7 @@ void TankEntity::applyDrive(
         return;
     }
 
-    // Airborne: preserve launch velocity with weak 4-directional WASD trajectory correction.
+    // Airborne: smooth physics integration with chaotic comedic tumble + weak 4-way air drift.
     curr_.velocity += moveDirXZ * (spec_.airControlAccel * dt);
     curr_.velocity.y -= spec_.gravity * dt;
 
@@ -233,24 +330,49 @@ void TankEntity::applyDrive(
     curr_.bodyPos.x = std::clamp(curr_.bodyPos.x, -arenaHalfExtent, arenaHalfExtent);
     curr_.bodyPos.z = std::clamp(curr_.bodyPos.z, -arenaHalfExtent, arenaHalfExtent);
 
-    const glm::vec3 forwardXZ{-std::sin(curr_.bodyYaw), 0.0f, -std::cos(curr_.bodyYaw)};
-    const float surfaceBelow = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
-    if (curr_.bodyPos.y <= surfaceBelow && curr_.velocity.y <= 0.0f)
+    const float angSpeed = glm::length(curr_.angularVel);
+    if (angSpeed > 1e-4f)
     {
-        curr_.bodyPos.y = surfaceBelow;
-        curr_.velocity = glm::vec3{0.0f};
-        curr_.airborne = false;
-        curr_.onRamp = ramp && ramp->containsXZ(curr_.bodyPos.x, curr_.bodyPos.z) && surfaceBelow > 0.01f;
-        curr_.bodyPitch = curr_.onRamp
-            ? (ramp->slopePitchRad() * glm::dot(forwardXZ, glm::vec3{0.0f, 0.0f, -1.0f}))
-            : 0.0f;
-    }
-    else
-    {
-        curr_.bodyPitch = std::clamp(curr_.velocity.y * 0.045f, -0.25f, 0.35f);
+        const glm::quat stepRot = glm::angleAxis(angSpeed * dt, curr_.angularVel / angSpeed);
+        curr_.bodyRot = glm::normalize(curr_.bodyRot * stepRot);
+        curr_.angularVel *= std::exp(-0.55f * dt);
     }
 
-    curr_.bodyRot = buildBodyRotation(curr_.bodyYaw, curr_.bodyPitch);
+    const float surfaceBelow = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
+    const float heightNow = std::max(0.0f, curr_.bodyPos.y - surfaceBelow);
+
+    // Smoothly align tank bottom face downward during descent so tracks land flat on the floor.
+    if (curr_.velocity.y < 0.0f && heightNow < 5.5f)
+    {
+        const glm::vec3 currFwd = curr_.bodyRot * glm::vec3{0.0f, 0.0f, -1.0f};
+        if (currFwd.x * currFwd.x + currFwd.z * currFwd.z > 0.04f)
+            curr_.bodyYaw = std::atan2(-currFwd.x, -currFwd.z);
+
+        const float proximity = 1.0f - std::clamp(heightNow / 5.5f, 0.0f, 1.0f);
+        curr_.angularVel *= std::exp(-(4.5f + proximity * 8.0f) * dt);
+
+        const glm::quat uprightRot = buildBodyRotation(curr_.bodyYaw, 0.0f);
+        const float alignRate = 4.0f + proximity * 14.0f;
+        curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, uprightRot, std::clamp(dt * alignRate, 0.0f, 1.0f)));
+    }
+
+    if (curr_.bodyPos.y <= surfaceBelow && curr_.velocity.y <= 0.0f)
+    {
+        const float bodyRadius = std::min(spec_.bodyHalfExtents.x, spec_.bodyHalfExtents.z);
+        resolveObstaclePenetrationXZ(curr_.bodyPos.x, curr_.bodyPos.z, bodyRadius, solidObstacles);
+        curr_.bodyPos.x = std::clamp(curr_.bodyPos.x, -arenaHalfExtent, arenaHalfExtent);
+        curr_.bodyPos.z = std::clamp(curr_.bodyPos.z, -arenaHalfExtent, arenaHalfExtent);
+
+        const float resolvedSurface = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
+        curr_.bodyPos.y = resolvedSurface;
+        curr_.velocity = glm::vec3{0.0f};
+        curr_.angularVel = glm::vec3{0.0f};
+        curr_.airborne = false;
+        curr_.onRamp = ramp && ramp->containsXZ(curr_.bodyPos.x, curr_.bodyPos.z) && resolvedSurface > 0.01f;
+        curr_.bodyPitch = 0.0f;
+        const glm::quat uprightRot = buildBodyRotation(curr_.bodyYaw, 0.0f);
+        curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, uprightRot, 0.45f));
+    }
 }
 
 void TankEntity::adjustManualAim(float turretTurnInput, float barrelPitchInput, float dt)
@@ -265,7 +387,7 @@ void TankEntity::adjustManualAim(float turretTurnInput, float barrelPitchInput, 
         spec_.maxPitchRad);
 }
 
-void TankEntity::aimAt(const glm::vec3& worldTarget)
+void TankEntity::aimAt(const glm::vec3& worldTarget, bool syncPrev)
 {
     if (!alive())
         return;
@@ -295,6 +417,12 @@ void TankEntity::aimAt(const glm::vec3& worldTarget)
             std::atan2(localAtHinge.y, std::max(hingeHoriz, 1e-4f)),
             spec_.minPitchRad,
             spec_.maxPitchRad);
+    }
+
+    if (syncPrev)
+    {
+        prev_.turretYaw = curr_.turretYaw;
+        prev_.barrelPitch = curr_.barrelPitch;
     }
 }
 

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <limits>
 #include <print>
 #include <string_view>
 
@@ -176,6 +177,7 @@ void ArenaScene::reset()
 
     projectiles_.clear();
     frameHits_.clear();
+    explosionBursts_.clear();
     trickshot_.reset();
     totalTargetHits_ = 0;
     displayedColliders_ = gatherColliders(false, 0.0f);
@@ -192,25 +194,40 @@ void ArenaScene::reset()
 
 void ArenaScene::updateRealTime(
     float rawDt,
+    float renderAlpha,
     const glm::vec2& rawMouseDelta,
     const glm::vec3& mainCamPos,
     const glm::vec3& mainCamLookAt,
     float mainCamFovDeg)
 {
+    const float clampedDt = std::clamp(rawDt, 0.0f, 0.1f);
+    for (ExplosionBurst& burst : explosionBursts_)
+        burst.elapsed += clampedDt;
+    std::erase_if(explosionBursts_, [](const ExplosionBurst& b) { return b.elapsed >= b.duration; });
+
     const EnemyEntity* selected = findAliveEnemy(trickshot_.selectedTargetId());
     const bool targetAlive = (selected != nullptr);
-    const glm::vec3 targetPos = targetAlive ? selected->tank.position() : glm::vec3{0.0f};
+    const glm::vec3 playerRenderPos = player_.interpolatedPosition(renderAlpha);
+    const glm::vec3 targetRenderPos = targetAlive ? selected->tank.interpolatedPosition(renderAlpha) : glm::vec3{0.0f};
 
     trickshot_.update(
-        rawDt,
+        clampedDt,
         rawMouseDelta,
         player_.isAirborne(),
         targetAlive,
         mainCamPos,
         mainCamLookAt,
         mainCamFovDeg,
-        player_.position(),
-        targetPos);
+        playerRenderPos,
+        targetRenderPos);
+
+    // Keep barrel aim synchronized with the stabilized back-view camera at full render framerate.
+    if (trickshot_.isInFocusControl() && targetAlive)
+    {
+        const glm::vec3 aimOrigin = playerRenderPos + glm::vec3{0.0f, 1.45f, 0.0f};
+        const glm::vec3 targetCenter = targetRenderPos + glm::vec3{0.0f, 0.9f, 0.0f};
+        player_.aimAt(trickshot_.computeAimWorldTarget(aimOrigin, targetCenter), true);
+    }
 }
 
 bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedView& view)
@@ -234,20 +251,64 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
     }
 
     if (cmd.selectTargetRequested)
-        trickshot_.selectTarget(cmd.cursorPos, view, displayedColliders_, player_.id());
+        trickshot_.selectTarget(cmd.selectCursorPos, view, displayedColliders_, player_.id());
 
     player_.beginTick(dt);
     for (EnemyEntity& enemy : enemies_)
         enemy.tank.beginTick(dt);
 
+    const EnemyEntity* selectedTarget = findAliveEnemy(trickshot_.selectedTargetId());
+    if (cmd.explosionToggleRequested)
+    {
+        if (trickshot_.isInFocusControl())
+        {
+            trickshot_.cancelImmediate("B Toggle Off");
+        }
+        else
+        {
+            // Guarantee target lock for B explosion trickshot if any enemy is alive.
+            if (selectedTarget == nullptr)
+            {
+                float bestDistSq = std::numeric_limits<float>::infinity();
+                for (const EnemyEntity& enemy : enemies_)
+                {
+                    if (!enemy.tank.alive())
+                        continue;
+                    const glm::vec3 diff = enemy.tank.position() - player_.position();
+                    const float distSq = diff.x * diff.x + diff.z * diff.z;
+                    if (distSq < bestDistSq)
+                    {
+                        bestDistSq = distSq;
+                        selectedTarget = &enemy;
+                    }
+                }
+                if (selectedTarget != nullptr)
+                {
+                    trickshot_.setSelectedTargetForTest(selectedTarget->id);
+                    std::println("[CP02] Auto-Focus on B | Target ID={}", selectedTarget->id);
+                }
+            }
+
+            glm::vec3 jumpDir{cmd.moveRight, 0.0f, -cmd.moveForward};
+            if (glm::dot(jumpDir, jumpDir) < 1e-4f && selectedTarget != nullptr)
+                jumpDir = selectedTarget->tank.position() - player_.position();
+            explosionBursts_.push_back({player_.position(), 0.0f, 0.45f});
+            player_.triggerExplosionJump(jumpDir);
+            trickshot_.onTakeoff();
+            if (selectedTarget != nullptr)
+                trickshot_.enterImmediate(true);
+            else
+                std::println("[CP02] Explosion Jump (B) | No alive enemy remaining");
+        }
+    }
+
     const OBB solidObstacles[1]{barricadeBox_};
     player_.applyDrive(cmd.moveForward, cmd.moveRight, dt, &ramp_, solidObstacles, kFloorHalfWidth - 2.0f);
 
-    if (player_.tookOffThisTick())
+    if (player_.tookOffThisTick() && !cmd.explosionToggleRequested)
         trickshot_.onTakeoff();
 
-    const EnemyEntity* selectedTarget = findAliveEnemy(trickshot_.selectedTargetId());
-    if (player_.isAirborne() && selectedTarget != nullptr)
+    if (player_.isAirborne() && selectedTarget != nullptr && !trickshot_.isInFocusControl())
     {
         trickshot_.tryEnter(
             true,
@@ -259,15 +320,15 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
 
     if (trickshot_.isInFocusControl() && selectedTarget != nullptr)
     {
-        const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.1f, 0.0f};
+        const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.45f, 0.0f};
         const glm::vec3 targetCenter = selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
-        player_.aimAt(trickshot_.computeAimWorldTarget(aimOrigin, targetCenter));
+        player_.aimAt(trickshot_.computeAimWorldTarget(aimOrigin, targetCenter), true);
     }
     else if (cmd.manualTurretTurn != 0.0f || cmd.manualBarrelPitch != 0.0f)
     {
         player_.adjustManualAim(cmd.manualTurretTurn, cmd.manualBarrelPitch, dt);
     }
-    else if (cmd.turretAimActive && view.valid)
+    else if (cmd.hasMouseAim && view.valid)
     {
         const glm::vec3 aimPoint = computeMouseAimPoint(cmd.cursorPos, view);
         player_.aimAt(aimPoint);
@@ -283,6 +344,8 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
                 if (player_.tryFire(spawned, true))
                 {
                     projectiles_.push_back(spawned);
+                    player_.applyFireRecoil(spawned.velocity);
+                    explosionBursts_.push_back({spawned.pos, 0.0f, 0.22f});
                     std::println(
                         "[CP02] Trickshot Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
                         spawned.ownerId,
@@ -301,6 +364,8 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
             if (player_.tryFire(spawned))
             {
                 projectiles_.push_back(spawned);
+                player_.applyFireRecoil(spawned.velocity);
+                explosionBursts_.push_back({spawned.pos, 0.0f, 0.18f});
                 std::println(
                     "[CP01] Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
                     spawned.ownerId,
@@ -376,15 +441,18 @@ std::vector<TraceCollider> ArenaScene::gatherColliders(bool interpolated, float 
 
 glm::vec3 ArenaScene::computeMouseAimPoint(const glm::vec2& cursorPos, const PresentedView& view) const
 {
-    const float winY = view.windowSize.y - cursorPos.y;
+    const float scaleX = (view.windowSize.x > 1.0f) ? (static_cast<float>(view.viewport.z) / view.windowSize.x) : 1.0f;
+    const float scaleY = (view.windowSize.y > 1.0f) ? (static_cast<float>(view.viewport.w) / view.windowSize.y) : 1.0f;
+    const float fbX = static_cast<float>(view.viewport.x) + cursorPos.x * scaleX;
+    const float fbY = static_cast<float>(view.viewport.y) + (view.windowSize.y - cursorPos.y) * scaleY;
     const glm::vec4 vp{
         static_cast<float>(view.viewport.x),
         static_cast<float>(view.viewport.y),
         static_cast<float>(view.viewport.z),
         static_cast<float>(view.viewport.w)};
 
-    const glm::vec3 nearPt = glm::unProject(glm::vec3{cursorPos.x, winY, 0.0f}, view.view, view.projection, vp);
-    const glm::vec3 farPt = glm::unProject(glm::vec3{cursorPos.x, winY, 1.0f}, view.view, view.projection, vp);
+    const glm::vec3 nearPt = glm::unProject(glm::vec3{fbX, fbY, 0.0f}, view.view, view.projection, vp);
+    const glm::vec3 farPt = glm::unProject(glm::vec3{fbX, fbY, 1.0f}, view.view, view.projection, vp);
     const glm::vec3 diff = farPt - nearPt;
     const float lenSq = glm::dot(diff, diff);
     if (lenSq < 1e-8f)
@@ -558,14 +626,28 @@ PreviewFrame ArenaScene::buildFrame(float alpha)
         }
     }
 
+    for (const ExplosionBurst& burst : explosionBursts_)
+    {
+        const float p = std::clamp(burst.elapsed / burst.duration, 0.0f, 1.0f);
+        const float radius = 0.7f + p * 3.4f;
+        const float coreScale = std::max(0.25f, (1.0f - p) * 2.2f);
+        const glm::vec3 burstColor = glm::mix(glm::vec3{1.0f, 0.92f, 0.30f}, glm::vec3{1.0f, 0.32f, 0.08f}, p);
+
+        const glm::mat4 coreDraw =
+            glm::translate(glm::mat4{1.0f}, burst.origin + glm::vec3{0.0f, coreScale * 0.4f, 0.0f}) *
+            glm::scale(glm::mat4{1.0f}, glm::vec3{coreScale});
+        frame.boxes.push_back({coreDraw, burstColor, false});
+        appendGroundCircle(frame.lines, burst.origin, radius, burstColor, 20);
+    }
+
     const float t = std::clamp(alpha, 0.0f, 1.0f);
     for (const Projectile& proj : projectiles_)
     {
         const glm::vec3 renderPos = glm::mix(proj.prevPos, proj.pos, t);
         const glm::mat4 projDraw =
             glm::translate(glm::mat4{1.0f}, renderPos) *
-            glm::scale(glm::mat4{1.0f}, glm::vec3{0.24f});
-        frame.boxes.push_back({projDraw, glm::vec3{1.0f, 0.92f, 0.30f}, false});
+            glm::scale(glm::mat4{1.0f}, glm::vec3{0.30f});
+        frame.boxes.push_back({projDraw, glm::vec3{0.96f, 0.14f, 0.12f}, false});
     }
 
     return frame;

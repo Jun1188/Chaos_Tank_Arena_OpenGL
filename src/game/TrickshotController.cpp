@@ -40,15 +40,18 @@ EntityId TrickshotController::selectTarget(
         return selectedTargetId_;
     }
 
-    const float winY = view.windowSize.y - cursorPos.y;
+    const float scaleX = (view.windowSize.x > 1.0f) ? (static_cast<float>(view.viewport.z) / view.windowSize.x) : 1.0f;
+    const float scaleY = (view.windowSize.y > 1.0f) ? (static_cast<float>(view.viewport.w) / view.windowSize.y) : 1.0f;
+    const float fbX = static_cast<float>(view.viewport.x) + cursorPos.x * scaleX;
+    const float fbY = static_cast<float>(view.viewport.y) + (view.windowSize.y - cursorPos.y) * scaleY;
     const glm::vec4 vp{
         static_cast<float>(view.viewport.x),
         static_cast<float>(view.viewport.y),
         static_cast<float>(view.viewport.z),
         static_cast<float>(view.viewport.w)};
 
-    const glm::vec3 nearPt = glm::unProject(glm::vec3{cursorPos.x, winY, 0.0f}, view.view, view.projection, vp);
-    const glm::vec3 farPt = glm::unProject(glm::vec3{cursorPos.x, winY, 1.0f}, view.view, view.projection, vp);
+    const glm::vec3 nearPt = glm::unProject(glm::vec3{fbX, fbY, 0.0f}, view.view, view.projection, vp);
+    const glm::vec3 farPt = glm::unProject(glm::vec3{fbX, fbY, 1.0f}, view.view, view.projection, vp);
     const glm::vec3 diff = farPt - nearPt;
     const float lenSq = glm::dot(diff, diff);
     if (lenSq < 1e-8f)
@@ -122,6 +125,32 @@ bool TrickshotController::tryEnter(
         heightAboveGround,
         timeScale_);
     return true;
+}
+
+bool TrickshotController::enterImmediate(bool targetAlive)
+{
+    if (selectedTargetId_ == kInvalidEntityId || !targetAlive)
+        return false;
+
+    state_ = TrickshotState::TransitionIn;
+    usedThisAirborne_ = true;
+    shotFiredThisAirborne_ = false;
+    showClickIcon_ = false;
+    transitionT_ = 0.0f;
+    timeScale_ = config_.slowTimeScale;
+    aimYawOffset_ = 0.0f;
+    aimPitchOffset_ = 0.0f;
+
+    std::println(
+        "[CP02] Explosion Trickshot ENTER (B) | Target ID={} | TimeScale={:.2f}x",
+        selectedTargetId_,
+        timeScale_);
+    return true;
+}
+
+void TrickshotController::cancelImmediate(const char* reason)
+{
+    exitToMain(reason);
 }
 
 void TrickshotController::exitToMain(const char* reason)
@@ -211,21 +240,25 @@ void TrickshotController::update(
 
     if (isInFocusControl() && targetAlive)
     {
+        const glm::vec3 aimOrigin = playerPos + glm::vec3{0.0f, 1.45f, 0.0f};
         const glm::vec3 targetCenter = targetPos + glm::vec3{0.0f, 0.9f, 0.0f};
-        glm::vec3 toTarget = targetCenter - playerPos;
-        toTarget.y = 0.0f;
-        const float horizLen = glm::length(toTarget);
-        const glm::vec3 dirXZ = (horizLen > 1e-4f) ? (toTarget / horizLen) : glm::vec3{0.0f, 0.0f, -1.0f};
+        const glm::vec3 aimPoint = computeAimWorldTarget(aimOrigin, targetCenter);
+        glm::vec3 aimDir = aimPoint - aimOrigin;
+        const float aimLen = glm::length(aimDir);
+        aimDir = (aimLen > 1e-4f) ? (aimDir / aimLen) : glm::vec3{0.0f, 0.0f, -1.0f};
 
-        lastSubCamPos_ = playerPos - dirXZ * 7.2f + glm::vec3{0.0f, 3.2f, 0.0f};
-        lastSubCamLookAt_ = computeAimWorldTarget(playerPos + glm::vec3{0.0f, 1.1f, 0.0f}, targetCenter);
+        // Stabilized world-horizon near-1st-person back-view synced with barrel aim; ignores hull spin.
+        lastSubCamPos_ = aimOrigin - aimDir * 3.0f + glm::vec3{0.0f, 0.65f, 0.0f};
+        lastSubCamPos_.y = std::max(lastSubCamPos_.y, 1.15f);
+        lastSubCamLookAt_ = aimPoint;
     }
 
-    cameraRequest_.blendAlpha = transitionT_;
+    const float smoothT = transitionT_ * transitionT_ * (3.0f - 2.0f * transitionT_);
+    cameraRequest_.blendAlpha = smoothT;
     cameraRequest_.active = (transitionT_ > 0.0f);
-    cameraRequest_.position = glm::mix(mainCamPos, lastSubCamPos_, transitionT_);
-    cameraRequest_.lookAt = glm::mix(mainCamLookAt, lastSubCamLookAt_, transitionT_);
-    cameraRequest_.fovDeg = glm::mix(mainCamFovDeg, config_.subFovDeg, transitionT_);
+    cameraRequest_.position = glm::mix(mainCamPos, lastSubCamPos_, smoothT);
+    cameraRequest_.lookAt = glm::mix(mainCamLookAt, lastSubCamLookAt_, smoothT);
+    cameraRequest_.fovDeg = glm::mix(mainCamFovDeg, config_.subFovDeg, smoothT);
 }
 
 glm::vec3 TrickshotController::computeAimWorldTarget(const glm::vec3& originPos, const glm::vec3& targetCenter) const

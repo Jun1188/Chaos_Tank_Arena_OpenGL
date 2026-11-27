@@ -34,19 +34,29 @@ void InputBuffer::onKey(int key, int action)
         break;
     case GLFW_KEY_LEFT:
         arrowLeft_ = pressed;
+        if (pressed)
+            hasMouseAim_ = false;
         break;
     case GLFW_KEY_RIGHT:
         arrowRight_ = pressed;
+        if (pressed)
+            hasMouseAim_ = false;
         break;
     case GLFW_KEY_UP:
         arrowUp_ = pressed;
+        if (pressed)
+            hasMouseAim_ = false;
         break;
     case GLFW_KEY_DOWN:
         arrowDown_ = pressed;
+        if (pressed)
+            hasMouseAim_ = false;
+        break;
+    case GLFW_KEY_B:
+        if (pressed)
+            explosionToggleQueued_ = true;
         break;
     case GLFW_KEY_R:
-        rotateTurretHeld_ = pressed;
-        break;
     case GLFW_KEY_F5:
         if (pressed)
             restartQueued_ = true;
@@ -72,7 +82,10 @@ void InputBuffer::onMouseButton(int button, int action)
     if (button == GLFW_MOUSE_BUTTON_LEFT)
         fireQueued_ = true;
     else if (button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
         selectTargetQueued_ = true;
+        selectCursorPos_ = cursorPos_;
+    }
 }
 
 void InputBuffer::onCursorPos(float x, float y)
@@ -88,6 +101,8 @@ void InputBuffer::onCursorPos(float x, float y)
     const glm::vec2 delta = next - cursorPos_;
     cursorPos_ = next;
     rawMouseDelta_ += delta;
+    if (std::abs(delta.x) + std::abs(delta.y) > 0.25f)
+        hasMouseAim_ = true;
 }
 
 TickCommand InputBuffer::peekCommand() const
@@ -98,9 +113,11 @@ TickCommand InputBuffer::peekCommand() const
     cmd.manualTurretTurn = (arrowLeft_ ? 1.0f : 0.0f) - (arrowRight_ ? 1.0f : 0.0f);
     cmd.manualBarrelPitch = (arrowUp_ ? 1.0f : 0.0f) - (arrowDown_ ? 1.0f : 0.0f);
     cmd.cursorPos = cursorPos_;
-    cmd.turretAimActive = rotateTurretHeld_;
+    cmd.selectCursorPos = selectCursorPos_;
+    cmd.hasMouseAim = hasMouseAim_;
     cmd.fireRequested = fireQueued_;
     cmd.selectTargetRequested = selectTargetQueued_;
+    cmd.explosionToggleRequested = explosionToggleQueued_;
     cmd.restartRequested = restartQueued_;
     cmd.toggleDebugRequested = toggleDebugQueued_;
     cmd.despawnSelectedTargetRequested = despawnSelectedTargetQueued_;
@@ -118,6 +135,7 @@ void InputBuffer::consumeOneShot()
 {
     fireQueued_ = false;
     selectTargetQueued_ = false;
+    explosionToggleQueued_ = false;
     restartQueued_ = false;
     toggleDebugQueued_ = false;
     despawnSelectedTargetQueued_ = false;
@@ -129,14 +147,15 @@ void InputBuffer::reset()
     s_ = false;
     a_ = false;
     d_ = false;
-    rotateTurretHeld_ = false;
     arrowLeft_ = false;
     arrowRight_ = false;
     arrowUp_ = false;
     arrowDown_ = false;
     rawMouseDelta_ = glm::vec2{0.0f, 0.0f};
+    hasMouseAim_ = true;
     fireQueued_ = false;
     selectTargetQueued_ = false;
+    explosionToggleQueued_ = false;
     restartQueued_ = false;
     toggleDebugQueued_ = false;
     despawnSelectedTargetQueued_ = false;

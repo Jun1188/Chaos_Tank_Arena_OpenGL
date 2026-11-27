@@ -13,9 +13,11 @@ struct TickCommand
     float manualTurretTurn{0.0f};
     float manualBarrelPitch{0.0f};
     glm::vec2 cursorPos{0.0f, 0.0f};
-    bool turretAimActive{false};
+    glm::vec2 selectCursorPos{0.0f, 0.0f};
+    bool hasMouseAim{true};
     bool fireRequested{false};
     bool selectTargetRequested{false};
+    bool explosionToggleRequested{false};
     bool restartRequested{false};
     bool toggleDebugRequested{false};
     bool despawnSelectedTargetRequested{false};
@@ -38,18 +40,20 @@ private:
     bool s_{false};
     bool a_{false};
     bool d_{false};
-    bool rotateTurretHeld_{false};
     bool arrowLeft_{false};
     bool arrowRight_{false};
     bool arrowUp_{false};
     bool arrowDown_{false};
 
     glm::vec2 cursorPos_{0.0f, 0.0f};
+    glm::vec2 selectCursorPos_{0.0f, 0.0f};
     glm::vec2 rawMouseDelta_{0.0f, 0.0f};
     bool cursorInitialized_{false};
+    bool hasMouseAim_{true};
 
     bool fireQueued_{false};
     bool selectTargetQueued_{false};
+    bool explosionToggleQueued_{false};
     bool restartQueued_{false};
     bool toggleDebugQueued_{false};
     bool despawnSelectedTargetQueued_{false};

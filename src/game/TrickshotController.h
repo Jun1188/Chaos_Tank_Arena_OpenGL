@@ -51,10 +51,10 @@ struct TrickshotConfig
 {
     float minHeightH{1.6f};
     float maxRadiusR{12.5f};
-    float slowTimeScale{0.25f};
-    float transitionInDurationSec{0.30f};
+    float slowTimeScale{0.12f};
+    float transitionInDurationSec{0.35f};
     float transitionOutDurationSec{0.25f};
-    float subFovDeg{32.0f};
+    float subFovDeg{26.0f};
     float maxAimYawRad{0.38f};
     float maxAimPitchRad{0.28f};
     float aimSensitivityRadPerPx{0.0028f};
@@ -87,6 +87,9 @@ public:
         bool targetAlive,
         const glm::vec3& playerPos,
         const glm::vec3& targetPos);
+
+    bool enterImmediate(bool targetAlive);
+    void cancelImmediate(const char* reason = "Toggled Off");
 
     void update(
         float rawDt,

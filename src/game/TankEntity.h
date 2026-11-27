@@ -4,6 +4,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <random>
 #include <span>
 
 namespace game
@@ -47,8 +48,8 @@ struct TankSpec
     float airControlAccel{5.5f};
     float gravity{12.0f};
     float manualAimSpeedRad{1.8f};
-    float minPitchRad{-0.45f};
-    float maxPitchRad{0.70f};
+    float minPitchRad{-0.75f};
+    float maxPitchRad{1.05f};
 
     float fireCooldownSec{0.35f};
     float projectileSpeed{32.0f};
@@ -104,11 +105,15 @@ public:
         const RampSurface* ramp = nullptr,
         std::span<const OBB> solidObstacles = {},
         float arenaHalfExtent = 23.0f);
+    void triggerExplosionJump(const glm::vec3& horizontalDirXZ);
+    void applyFireRecoil(const glm::vec3& fireForward);
     void adjustManualAim(float turretTurnInput, float barrelPitchInput, float dt);
-    void aimAt(const glm::vec3& worldTarget);
+    void aimAt(const glm::vec3& worldTarget, bool syncPrev = false);
 
     TankPose evaluatePose() const;
     TankPose evaluatePose(float alpha) const;
+    glm::vec3 interpolatedPosition(float alpha) const;
+    glm::vec3 interpolatedForwardXZ(float alpha) const;
 
     bool tryFire(Projectile& outProjectile, bool ignoreCooldown = false);
     void applyDamage(int amount);
@@ -131,6 +136,7 @@ private:
         glm::vec3 bodyPos{0.0f};
         glm::quat bodyRot{1.0f, 0.0f, 0.0f, 0.0f};
         glm::vec3 velocity{0.0f};
+        glm::vec3 angularVel{0.0f};
         float bodyYaw{0.0f};
         float bodyPitch{0.0f};
         float turretYaw{0.0f};
@@ -150,5 +156,6 @@ private:
     int hp_{100};
     float cooldownRemaining_{0.0f};
     bool tookOffThisTick_{false};
+    std::mt19937 rng_{std::random_device{}()};
 };
 } // namespace game

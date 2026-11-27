@@ -72,6 +72,7 @@ public:
     void reset();
     void updateRealTime(
         float rawDt,
+        float renderAlpha,
         const glm::vec2& rawMouseDelta,
         const glm::vec3& mainCamPos,
         const glm::vec3& mainCamLookAt,
@@ -80,6 +81,8 @@ public:
     PreviewFrame buildFrame(float alpha);
 
     const TankEntity& player() const { return player_; }
+    glm::vec3 playerInterpolatedPosition(float alpha) const { return player_.interpolatedPosition(alpha); }
+    glm::vec3 playerInterpolatedForwardXZ(float alpha) const { return player_.interpolatedForwardXZ(alpha); }
     const std::vector<EnemyEntity>& enemies() const { return enemies_; }
     const std::vector<Projectile>& projectiles() const { return projectiles_; }
     const std::vector<HitRecord>& frameHits() const { return frameHits_; }
@@ -110,6 +113,14 @@ private:
     std::vector<TraceCollider> displayedColliders_{};
     TrickshotController trickshot_{};
 
+    struct ExplosionBurst
+    {
+        glm::vec3 origin{0.0f};
+        float elapsed{0.0f};
+        float duration{0.45f};
+    };
+
+    std::vector<ExplosionBurst> explosionBursts_{};
     EntityId nextEntityId_{1};
     std::uint32_t totalTargetHits_{0};
     bool debugOverlay_{true};
