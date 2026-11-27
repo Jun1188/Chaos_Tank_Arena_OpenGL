@@ -9,9 +9,11 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)Physics.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TankEntity.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TimeManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)TrickshotController.cpp" />
     <ClInclude Include="$(MSBuildThisFileDirectory)ArenaScene.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)Physics.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)TankEntity.h" />
     <ClInclude Include="$(MSBuildThisFileDirectory)TimeManager.h" />
+    <ClInclude Include="$(MSBuildThisFileDirectory)TrickshotController.h" />
   </ItemGroup>
 </Project>

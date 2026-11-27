@@ -1,7 +1,9 @@
-﻿#include <format>
+﻿#include <cmath>
+#include <format>
 #include <limits>
 #include <print>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define CG_APPLICATION_CUSTOM_CALLBACK_KEY
@@ -23,6 +25,12 @@ struct RuntimeState
     tmpBoxing::PreviewRenderer previewRenderer{};
     game::PreviewFrame latestFrame{};
     game::PresentedView presentedView{};
+
+    glm::vec3 mainCamPos{0.0f, 13.0f, 21.0f};
+    glm::vec3 mainCamLookAt{0.0f, 0.8f, 0.0f};
+    float mainCamFovDeg{45.0f};
+    bool cameraWasDrivenByTrickshot{false};
+
     bool middleMouseHeld{false};
     std::string lastWindowTitle{};
 
@@ -36,9 +44,40 @@ RuntimeState g_Runtime{};
 
 void resetArenaCamera(Camera& cam)
 {
-    cam.PlaceAt(glm::vec3{0.0f, 13.0f, 19.0f});
-    cam.Zoom(45.0f);
-    cam.FocusAt(glm::vec3{0.0f, 0.8f, 0.0f});
+    g_Runtime.mainCamPos = glm::vec3{0.0f, 13.0f, 21.0f};
+    g_Runtime.mainCamLookAt = glm::vec3{0.0f, 0.8f, 0.0f};
+    g_Runtime.mainCamFovDeg = 45.0f;
+    g_Runtime.cameraWasDrivenByTrickshot = false;
+    cam.PlaceAt(g_Runtime.mainCamPos);
+    cam.Zoom(g_Runtime.mainCamFovDeg);
+    cam.FocusAt(g_Runtime.mainCamLookAt);
+}
+
+glm::vec3 cameraForwardFromAngles(const Camera& cam)
+{
+    const float yawRad = glm::radians(cam.QueryYaw());
+    const float pitchRad = glm::radians(cam.QueryPitch());
+    return glm::normalize(glm::vec3{
+        std::cos(yawRad) * std::cos(pitchRad),
+        std::sin(pitchRad),
+        std::sin(yawRad) * std::cos(pitchRad)});
+}
+
+std::string_view trickshotStateLabel(game::TrickshotState state)
+{
+    switch (state)
+    {
+    case game::TrickshotState::TransitionIn:
+        return "ZOOM_IN";
+    case game::TrickshotState::AimReady:
+        return "CLICK_NOW";
+    case game::TrickshotState::ShotFired:
+        return "FIRED";
+    case game::TrickshotState::TransitionOut:
+        return "RETURN";
+    default:
+        return "IDLE";
+    }
 }
 } // namespace
 
@@ -56,7 +95,7 @@ int main()
 
 void Application::OnInit()
 {
-    AppendCamera(glm::vec3{0.0f, 13.0f, 19.0f}, glm::vec3{0.0f, 1.0f, 0.0f}, 45.0f, -90.0f, -35.0f);
+    AppendCamera(g_Runtime.mainCamPos, glm::vec3{0.0f, 1.0f, 0.0f}, g_Runtime.mainCamFovDeg, -90.0f, -35.0f);
     resetArenaCamera(m_Cameras[0]);
     mouseActiveCamera = 0;
     glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -74,7 +113,7 @@ void Application::OnInit()
     g_Runtime.latestFrame = g_Runtime.scene.buildFrame(0.0f);
 
     std::println(
-        "[CP01 Controls] WASD: Hull | Mouse: Aim | LMB: Fire | Arrows: Manual Turret/Barrel | MMB Hold: Camera Look | KP 8/2/4/6/9/3: Camera Move | F1: Debug | F2: Unit QA | R: Reset | ESC: Quit");
+        "[CP02 Controls] WASD: 4-Way Body Move | Hold R + Mouse: Aim Turret/Barrel | LMB: Fire | RMB: Focus Target | Ramp(Right): Jump Trickshot | Arrows: Manual Turret/Barrel | MMB Hold: Camera Look | F1: Debug | F2: Unit QA | F3: QA-12 Despawn Focus | F5: Reset | ESC: Quit");
 }
 
 void Application::OnKeyEvent(int key, int action, int /*mods*/)
@@ -88,6 +127,7 @@ void Application::OnKeyEvent(int key, int action, int /*mods*/)
     if (key == GLFW_KEY_F2 && action == GLFW_PRESS)
     {
         game::runCp01UnitChecks();
+        game::runCp02UnitChecks();
         return;
     }
 
@@ -133,7 +173,21 @@ void Application::Update()
         glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
 
-    g_Runtime.timeManager.beginFrame(deltaTime, 1.0f);
+    if (!m_Cameras.empty() && !g_Runtime.cameraWasDrivenByTrickshot)
+    {
+        g_Runtime.mainCamPos = m_Cameras[0].QueryPos();
+        g_Runtime.mainCamLookAt = g_Runtime.mainCamPos + cameraForwardFromAngles(m_Cameras[0]) * 20.0f;
+    }
+
+    const glm::vec2 rawMouseDelta = g_Runtime.input.consumeRawMouseDelta();
+    g_Runtime.scene.updateRealTime(
+        deltaTime,
+        rawMouseDelta,
+        g_Runtime.mainCamPos,
+        g_Runtime.mainCamLookAt,
+        g_Runtime.mainCamFovDeg);
+
+    g_Runtime.timeManager.beginFrame(deltaTime, g_Runtime.scene.timeScale());
     while (g_Runtime.timeManager.consumeStep())
     {
         const game::TickCommand cmd = g_Runtime.input.peekCommand();
@@ -153,15 +207,45 @@ void Application::Update()
         }
     }
 
+    // Keep real-time trickshot camera/slow exit responsive on the same frame as takeoff/landing/target loss.
+    g_Runtime.scene.updateRealTime(
+        0.0f,
+        glm::vec2{0.0f, 0.0f},
+        g_Runtime.mainCamPos,
+        g_Runtime.mainCamLookAt,
+        g_Runtime.mainCamFovDeg);
+
     g_Runtime.latestFrame = g_Runtime.scene.buildFrame(g_Runtime.timeManager.alpha());
     g_Runtime.scene.clearFrameHits();
 
+    if (!m_Cameras.empty())
+    {
+        const game::CameraRequest& camReq = g_Runtime.latestFrame.cameraRequest;
+        if (camReq.active)
+        {
+            m_Cameras[0].PlaceAt(camReq.position);
+            m_Cameras[0].Zoom(camReq.fovDeg);
+            m_Cameras[0].FocusAt(camReq.lookAt);
+            g_Runtime.cameraWasDrivenByTrickshot = true;
+        }
+        else if (g_Runtime.cameraWasDrivenByTrickshot)
+        {
+            m_Cameras[0].PlaceAt(g_Runtime.mainCamPos);
+            m_Cameras[0].Zoom(g_Runtime.mainCamFovDeg);
+            m_Cameras[0].FocusAt(g_Runtime.mainCamLookAt);
+            g_Runtime.cameraWasDrivenByTrickshot = false;
+        }
+    }
+
+    const auto& ts = g_Runtime.latestFrame.trickshot;
     std::string nextTitle = std::format(
-        "Chaos Tank Arena [CP01] | Target HP: {}/{} | Hits: {} | Debug(F1): {} | UnitQA: F2 | Reset: R",
+        "Chaos Tank Arena [CP02] | Focus: {} | Trickshot: {} ({:.2f}x) | Target HP: {}/{} | Hits: {} | R+Mouse:Turret F1:Debug F2:QA F5:Reset",
+        ts.selectedTargetId == game::kInvalidEntityId ? std::string{"None"} : std::format("ID={}", ts.selectedTargetId),
+        trickshotStateLabel(ts.state),
+        ts.timeScale,
         g_Runtime.latestFrame.targetHp,
         g_Runtime.latestFrame.targetMaxHp,
-        g_Runtime.latestFrame.totalTargetHits,
-        g_Runtime.latestFrame.debugOverlay ? "ON" : "OFF");
+        g_Runtime.latestFrame.totalTargetHits);
     if (nextTitle != g_Runtime.lastWindowTitle)
     {
         g_Runtime.lastWindowTitle = std::move(nextTitle);

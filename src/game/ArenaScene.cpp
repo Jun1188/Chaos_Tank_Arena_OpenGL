@@ -31,6 +31,16 @@ std::string_view partName(PartKind part)
     }
 }
 
+glm::mat4 makeOBBDrawMatrix(const OBB& obb)
+{
+    glm::mat4 world{1.0f};
+    world[0] = glm::vec4{obb.axes[0], 0.0f};
+    world[1] = glm::vec4{obb.axes[1], 0.0f};
+    world[2] = glm::vec4{obb.axes[2], 0.0f};
+    world[3] = glm::vec4{obb.center, 1.0f};
+    return world * glm::scale(glm::mat4{1.0f}, obb.halfExtents * 2.0f);
+}
+
 void appendAxesLines(
     std::vector<PreviewLineItem>& lines,
     const glm::vec3& origin,
@@ -42,12 +52,30 @@ void appendAxesLines(
     lines.push_back({origin, origin - axes[2] * length, glm::vec3{0.30f, 0.65f, 1.0f}});
 }
 
+void appendGroundCircle(
+    std::vector<PreviewLineItem>& lines,
+    const glm::vec3& center,
+    float radius,
+    const glm::vec3& color,
+    int segments = 36)
+{
+    for (int i = 0; i < segments; ++i)
+    {
+        const float a0 = glm::two_pi<float>() * (static_cast<float>(i) / static_cast<float>(segments));
+        const float a1 = glm::two_pi<float>() * (static_cast<float>(i + 1) / static_cast<float>(segments));
+        const glm::vec3 p0{center.x + std::cos(a0) * radius, 0.04f, center.z + std::sin(a0) * radius};
+        const glm::vec3 p1{center.x + std::cos(a1) * radius, 0.04f, center.z + std::sin(a1) * radius};
+        lines.push_back({p0, p1, color});
+    }
+}
+
 void appendTankPreview(
     PreviewFrame& frame,
     const TankPose& pose,
     const glm::vec3& baseColor,
     bool drawDebug,
     bool drawAimRay,
+    bool selectedHighlight,
     const glm::vec3& materialTint)
 {
     // Keep boxing as a fallback when the GLB cannot be loaded.
@@ -56,13 +84,27 @@ void appendTankPreview(
     frame.boxes.push_back({pose.turretDraw, baseColor * 1.18f, false, true});
     frame.boxes.push_back({pose.barrelDraw, baseColor * 0.82f, false, true});
 
+    if (selectedHighlight)
+    {
+        const glm::vec3 focusColor{0.18f, 0.95f, 1.0f};
+        frame.boxes.push_back({pose.bodyDraw, focusColor, true});
+        frame.boxes.push_back({pose.turretDraw, focusColor, true});
+        const glm::vec3 top = pose.turretOBB.center + glm::vec3{0.0f, 0.55f, 0.0f};
+        frame.lines.push_back({top, top + glm::vec3{0.0f, 2.2f, 0.0f}, focusColor});
+        frame.lines.push_back({top + glm::vec3{-0.45f, 1.8f, 0.0f}, top + glm::vec3{0.45f, 1.8f, 0.0f}, focusColor});
+        frame.lines.push_back({top + glm::vec3{0.0f, 1.8f, -0.45f}, top + glm::vec3{0.0f, 1.8f, 0.45f}, focusColor});
+    }
+
     if (!drawDebug)
         return;
 
-    const glm::vec3 obbWireColor{0.95f, 0.90f, 0.25f};
-    frame.boxes.push_back({pose.bodyDraw, obbWireColor, true});
-    frame.boxes.push_back({pose.turretDraw, obbWireColor, true});
-    frame.boxes.push_back({pose.barrelDraw, obbWireColor, true});
+    if (!selectedHighlight)
+    {
+        const glm::vec3 obbWireColor{0.95f, 0.90f, 0.25f};
+        frame.boxes.push_back({pose.bodyDraw, obbWireColor, true});
+        frame.boxes.push_back({pose.turretDraw, obbWireColor, true});
+        frame.boxes.push_back({pose.barrelDraw, obbWireColor, true});
+    }
 
     appendAxesLines(frame.lines, pose.bodyOBB.center, pose.bodyOBB.axes, 1.8f);
     appendAxesLines(frame.lines, pose.muzzleOrigin, pose.muzzleAxes, 0.75f);
@@ -91,29 +133,84 @@ void ArenaScene::reset()
     floorBox_.axes = glm::mat3{1.0f};
     floorBox_.halfExtents = glm::vec3{kFloorHalfWidth, kFloorHalfThickness, kFloorHalfWidth};
 
+    // Jump ramp aligned toward -Z on the right lane.
+    ramp_ = RampSurface{};
+    {
+        const float run = ramp_.startZ - ramp_.endZ;
+        const float rise = ramp_.topHeight;
+        const float deckLength = std::sqrt(run * run + rise * rise);
+        const float slope = ramp_.slopePitchRad();
+        const glm::mat4 deckRot = glm::rotate(glm::mat4{1.0f}, slope, glm::vec3{1.0f, 0.0f, 0.0f});
+        const glm::mat3 deckAxes = glm::mat3(deckRot);
+        const float halfThick = 0.14f;
+        const glm::vec3 topMid{
+            (ramp_.minX + ramp_.maxX) * 0.5f,
+            rise * 0.5f,
+            (ramp_.startZ + ramp_.endZ) * 0.5f};
+
+        rampDeckBox_.center = topMid - deckAxes[1] * halfThick;
+        rampDeckBox_.axes = deckAxes;
+        rampDeckBox_.halfExtents = glm::vec3{(ramp_.maxX - ramp_.minX) * 0.5f, halfThick, deckLength * 0.5f};
+
+        rampSupportBox_.center = glm::vec3{(ramp_.minX + ramp_.maxX) * 0.5f, rise * 0.42f, ramp_.endZ + 0.85f};
+        rampSupportBox_.axes = glm::mat3{1.0f};
+        rampSupportBox_.halfExtents = glm::vec3{(ramp_.maxX - ramp_.minX) * 0.48f, rise * 0.42f, 0.85f};
+    }
+
+    // Opaque barricade partially occluding the enemy from spawn for QA-08 focus testing.
+    barricadeBox_ = OBB{};
+    barricadeBox_.center = glm::vec3{-1.25f, 0.95f, -6.2f};
+    barricadeBox_.axes = glm::mat3{1.0f};
+    barricadeBox_.halfExtents = glm::vec3{1.25f, 0.95f, 0.35f};
+
     nextEntityId_ = 1;
     const EntityId playerId = nextEntityId_++;
     const TankSpec tankSpec = makeSandTankSpec();
-    player_.reset(playerId, glm::vec3{0.0f, 0.0f, 8.0f}, 0.0f, tankSpec);
+    player_.reset(playerId, glm::vec3{0.0f, 0.0f, 10.0f}, 0.0f, tankSpec);
 
     enemies_.clear();
     EnemyEntity target{};
     target.id = nextEntityId_++;
-    target.tank.reset(target.id, glm::vec3{0.0f, 0.0f, -8.0f}, glm::pi<float>(), tankSpec);
+    target.tank.reset(target.id, glm::vec3{0.0f, 0.0f, -10.0f}, glm::pi<float>(), tankSpec);
     enemies_.push_back(target);
 
     projectiles_.clear();
     frameHits_.clear();
+    trickshot_.reset();
     totalTargetHits_ = 0;
+    displayedColliders_ = gatherColliders(false, 0.0f);
 
     std::println(
-        "[CP01] Reset | Player(ID={}) HP={}/{} | Target(ID={}) HP={}/{} | Projectiles=0 | Hits=0",
+        "[CP02] Reset | Player(ID={}) HP={}/{} | Target(ID={}) HP={}/{} | Focus=None | Projectiles=0",
         player_.id(),
         player_.hp(),
         player_.maxHp(),
         enemies_.front().id,
         enemies_.front().tank.hp(),
         enemies_.front().tank.maxHp());
+}
+
+void ArenaScene::updateRealTime(
+    float rawDt,
+    const glm::vec2& rawMouseDelta,
+    const glm::vec3& mainCamPos,
+    const glm::vec3& mainCamLookAt,
+    float mainCamFovDeg)
+{
+    const EnemyEntity* selected = findAliveEnemy(trickshot_.selectedTargetId());
+    const bool targetAlive = (selected != nullptr);
+    const glm::vec3 targetPos = targetAlive ? selected->tank.position() : glm::vec3{0.0f};
+
+    trickshot_.update(
+        rawDt,
+        rawMouseDelta,
+        player_.isAirborne(),
+        targetAlive,
+        mainCamPos,
+        mainCamLookAt,
+        mainCamFovDeg,
+        player_.position(),
+        targetPos);
 }
 
 bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedView& view)
@@ -127,17 +224,50 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
     if (cmd.toggleDebugRequested)
         debugOverlay_ = !debugOverlay_;
 
+    if (cmd.despawnSelectedTargetRequested)
+    {
+        if (EnemyEntity* selected = findAliveEnemy(trickshot_.selectedTargetId()))
+        {
+            selected->tank.applyDamage(selected->tank.maxHp());
+            std::println("[CP02] QA-12 test | Selected Target(ID={}) removed/destroyed", selected->id);
+        }
+    }
+
+    if (cmd.selectTargetRequested)
+        trickshot_.selectTarget(cmd.cursorPos, view, displayedColliders_, player_.id());
+
     player_.beginTick(dt);
     for (EnemyEntity& enemy : enemies_)
         enemy.tank.beginTick(dt);
 
-    player_.applyDrive(cmd.moveForward, cmd.turnYaw, dt, kFloorHalfWidth - 2.0f);
+    const OBB solidObstacles[1]{barricadeBox_};
+    player_.applyDrive(cmd.moveForward, cmd.moveRight, dt, &ramp_, solidObstacles, kFloorHalfWidth - 2.0f);
 
-    if (cmd.manualTurretTurn != 0.0f || cmd.manualBarrelPitch != 0.0f)
+    if (player_.tookOffThisTick())
+        trickshot_.onTakeoff();
+
+    const EnemyEntity* selectedTarget = findAliveEnemy(trickshot_.selectedTargetId());
+    if (player_.isAirborne() && selectedTarget != nullptr)
+    {
+        trickshot_.tryEnter(
+            true,
+            player_.heightAboveGround(&ramp_),
+            true,
+            player_.position(),
+            selectedTarget->tank.position());
+    }
+
+    if (trickshot_.isInFocusControl() && selectedTarget != nullptr)
+    {
+        const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.1f, 0.0f};
+        const glm::vec3 targetCenter = selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
+        player_.aimAt(trickshot_.computeAimWorldTarget(aimOrigin, targetCenter));
+    }
+    else if (cmd.manualTurretTurn != 0.0f || cmd.manualBarrelPitch != 0.0f)
     {
         player_.adjustManualAim(cmd.manualTurretTurn, cmd.manualBarrelPitch, dt);
     }
-    else if (cmd.hasMouseAim && view.valid)
+    else if (cmd.turretAimActive && view.valid)
     {
         const glm::vec3 aimPoint = computeMouseAimPoint(cmd.cursorPos, view);
         player_.aimAt(aimPoint);
@@ -145,19 +275,42 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
 
     if (cmd.fireRequested)
     {
-        Projectile spawned{};
-        if (player_.tryFire(spawned))
+        if (trickshot_.isInFocusControl())
         {
-            projectiles_.push_back(spawned);
-            std::println(
-                "[CP01] Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
-                spawned.ownerId,
-                spawned.pos.x,
-                spawned.pos.y,
-                spawned.pos.z,
-                spawned.velocity.x,
-                spawned.velocity.y,
-                spawned.velocity.z);
+            if (trickshot_.consumeShotOpportunity())
+            {
+                Projectile spawned{};
+                if (player_.tryFire(spawned, true))
+                {
+                    projectiles_.push_back(spawned);
+                    std::println(
+                        "[CP02] Trickshot Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
+                        spawned.ownerId,
+                        spawned.pos.x,
+                        spawned.pos.y,
+                        spawned.pos.z,
+                        spawned.velocity.x,
+                        spawned.velocity.y,
+                        spawned.velocity.z);
+                }
+            }
+        }
+        else if (trickshot_.canNormalFire())
+        {
+            Projectile spawned{};
+            if (player_.tryFire(spawned))
+            {
+                projectiles_.push_back(spawned);
+                std::println(
+                    "[CP01] Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
+                    spawned.ownerId,
+                    spawned.pos.x,
+                    spawned.pos.y,
+                    spawned.pos.z,
+                    spawned.velocity.x,
+                    spawned.velocity.y,
+                    spawned.velocity.z);
+            }
         }
     }
 
@@ -167,6 +320,8 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
 
 EnemyEntity* ArenaScene::findAliveEnemy(EntityId id)
 {
+    if (id == kInvalidEntityId)
+        return nullptr;
     for (EnemyEntity& enemy : enemies_)
     {
         if (enemy.id == id && enemy.tank.alive())
@@ -175,16 +330,31 @@ EnemyEntity* ArenaScene::findAliveEnemy(EntityId id)
     return nullptr;
 }
 
-std::vector<TraceCollider> ArenaScene::gatherColliders() const
+const EnemyEntity* ArenaScene::findAliveEnemy(EntityId id) const
+{
+    if (id == kInvalidEntityId)
+        return nullptr;
+    for (const EnemyEntity& enemy : enemies_)
+    {
+        if (enemy.id == id && enemy.tank.alive())
+            return &enemy;
+    }
+    return nullptr;
+}
+
+std::vector<TraceCollider> ArenaScene::gatherColliders(bool interpolated, float alpha) const
 {
     std::vector<TraceCollider> colliders{};
-    colliders.reserve(1 + (1 + enemies_.size()) * 3);
+    colliders.reserve(4 + (1 + enemies_.size()) * 3);
 
     colliders.push_back({kInvalidEntityId, PartKind::Terrain, floorBox_});
+    colliders.push_back({kInvalidEntityId, PartKind::Terrain, rampDeckBox_});
+    colliders.push_back({kInvalidEntityId, PartKind::Terrain, rampSupportBox_});
+    colliders.push_back({kInvalidEntityId, PartKind::Terrain, barricadeBox_});
 
     if (player_.alive())
     {
-        const TankPose p = player_.evaluatePose();
+        const TankPose p = interpolated ? player_.evaluatePose(alpha) : player_.evaluatePose();
         colliders.push_back({player_.id(), PartKind::Body, p.bodyOBB});
         colliders.push_back({player_.id(), PartKind::Turret, p.turretOBB});
         colliders.push_back({player_.id(), PartKind::Barrel, p.barrelOBB});
@@ -195,7 +365,7 @@ std::vector<TraceCollider> ArenaScene::gatherColliders() const
         if (!enemy.tank.alive())
             continue;
 
-        const TankPose e = enemy.tank.evaluatePose();
+        const TankPose e = interpolated ? enemy.tank.evaluatePose(alpha) : enemy.tank.evaluatePose();
         colliders.push_back({enemy.id, PartKind::Body, e.bodyOBB});
         colliders.push_back({enemy.id, PartKind::Turret, e.turretOBB});
         colliders.push_back({enemy.id, PartKind::Barrel, e.barrelOBB});
@@ -223,7 +393,7 @@ glm::vec3 ArenaScene::computeMouseAimPoint(const glm::vec2& cursorPos, const Pre
     const glm::vec3 rayDir = diff / std::sqrt(lenSq);
     const glm::vec3 rayEnd = nearPt + rayDir * 200.0f;
 
-    const std::vector<TraceCollider> colliders = gatherColliders();
+    const std::vector<TraceCollider> colliders = gatherColliders(false, 0.0f);
     const SegmentHit hit = Physics::traceSegment(nearPt, rayEnd, colliders, player_.id());
 
     glm::vec3 target = hit.hit ? hit.point : (nearPt + rayDir * 45.0f);
@@ -246,7 +416,7 @@ void ArenaScene::stepProjectiles(float dt)
     if (projectiles_.empty())
         return;
 
-    const std::vector<TraceCollider> colliders = gatherColliders();
+    const std::vector<TraceCollider> colliders = gatherColliders(false, 0.0f);
 
     for (Projectile& proj : projectiles_)
     {
@@ -308,11 +478,16 @@ void ArenaScene::stepProjectiles(float dt)
     std::erase_if(projectiles_, [](const Projectile& p) { return p.pendingRemoval; });
 }
 
-PreviewFrame ArenaScene::buildFrame(float alpha) const
+PreviewFrame ArenaScene::buildFrame(float alpha)
 {
+    // Cache displayed colliders matching the rendered poses for CP02-FOCUS right-click selection.
+    displayedColliders_ = gatherColliders(true, alpha);
+
     PreviewFrame frame{};
     frame.debugOverlay = debugOverlay_;
     frame.playerPos = player_.position();
+    frame.playerAirborne = player_.isAirborne();
+    frame.playerHeight = player_.heightAboveGround(&ramp_);
     frame.playerHp = player_.hp();
     if (!enemies_.empty())
     {
@@ -321,14 +496,19 @@ PreviewFrame ArenaScene::buildFrame(float alpha) const
     }
     frame.totalTargetHits = totalTargetHits_;
     frame.activeProjectiles = projectiles_.size();
+    frame.cameraRequest = trickshot_.cameraRequest();
+    frame.trickshot = trickshot_.hudState();
 
-    const glm::mat4 floorDraw =
-        glm::translate(glm::mat4{1.0f}, floorBox_.center) *
-        glm::scale(glm::mat4{1.0f}, floorBox_.halfExtents * 2.0f);
-    frame.boxes.push_back({floorDraw, glm::vec3{0.22f, 0.25f, 0.29f}, false});
+    frame.boxes.push_back({makeOBBDrawMatrix(floorBox_), glm::vec3{0.22f, 0.25f, 0.29f}, false});
+    frame.boxes.push_back({makeOBBDrawMatrix(rampDeckBox_), glm::vec3{0.76f, 0.56f, 0.22f}, false});
+    frame.boxes.push_back({makeOBBDrawMatrix(rampSupportBox_), glm::vec3{0.50f, 0.37f, 0.16f}, false});
+    frame.boxes.push_back({makeOBBDrawMatrix(barricadeBox_), glm::vec3{0.52f, 0.55f, 0.60f}, false});
 
     if (debugOverlay_)
     {
+        frame.boxes.push_back({makeOBBDrawMatrix(rampDeckBox_), glm::vec3{1.0f, 0.85f, 0.35f}, true});
+        frame.boxes.push_back({makeOBBDrawMatrix(barricadeBox_), glm::vec3{0.85f, 0.88f, 0.92f}, true});
+
         for (int g = -20; g <= 20; g += 5)
         {
             const float c = static_cast<float>(g);
@@ -346,6 +526,7 @@ PreviewFrame ArenaScene::buildFrame(float alpha) const
         glm::vec3{0.24f, 0.62f, 0.36f},
         debugOverlay_,
         true,
+        false,
         glm::vec3{1.0f});
 
     for (const EnemyEntity& enemy : enemies_)
@@ -356,6 +537,7 @@ PreviewFrame ArenaScene::buildFrame(float alpha) const
         const glm::vec3 enemyColor = enemy.tank.alive()
             ? glm::mix(glm::vec3{0.95f, 0.55f, 0.18f}, glm::vec3{0.82f, 0.24f, 0.24f}, hpRatio)
             : glm::vec3{0.32f, 0.32f, 0.34f};
+        const bool isSelected = enemy.tank.alive() && (enemy.id == trickshot_.selectedTargetId());
 
         appendTankPreview(
             frame,
@@ -363,7 +545,17 @@ PreviewFrame ArenaScene::buildFrame(float alpha) const
             enemyColor,
             debugOverlay_ && enemy.tank.alive(),
             false,
+            isSelected,
             enemyColor);
+
+        if (isSelected && debugOverlay_)
+        {
+            appendGroundCircle(
+                frame.lines,
+                enemy.tank.position(),
+                trickshot_.config().maxRadiusR,
+                glm::vec3{0.18f, 0.90f, 0.95f});
+        }
     }
 
     const float t = std::clamp(alpha, 0.0f, 1.0f);
@@ -494,6 +686,34 @@ void runCp01UnitChecks()
             hit.entityId,
             frontHits,
             backHits);
+    }
+}
+
+void runCp02UnitChecks()
+{
+    std::println("=== [CP02 QA Unit Checks] ===");
+
+    // QA-09: Height H and Radius R boundary checks for TrickshotController::canEnter
+    {
+        TrickshotController ctrl{};
+        TrickshotConfig cfg{};
+        cfg.minHeightH = 2.0f;
+        cfg.maxRadiusR = 10.0f;
+        ctrl.reset(cfg);
+        ctrl.setSelectedTargetForTest(2);
+
+        const glm::vec3 targetPos{0.0f, 0.0f, 0.0f};
+        const bool atBoundary = ctrl.canEnter(true, cfg.minHeightH, true, glm::vec3{cfg.maxRadiusR, cfg.minHeightH, 0.0f}, targetPos);
+        const bool outsideRadius = ctrl.canEnter(true, cfg.minHeightH, true, glm::vec3{cfg.maxRadiusR + 0.01f, cfg.minHeightH, 0.0f}, targetPos);
+        const bool belowHeight = ctrl.canEnter(true, cfg.minHeightH - 0.01f, true, glm::vec3{cfg.maxRadiusR, cfg.minHeightH - 0.01f, 0.0f}, targetPos);
+
+        const bool pass = atBoundary && !outsideRadius && !belowHeight;
+        std::println(
+            "[QA-09] {} | (H,R)={} (H,R+eps)={} (H-eps,R)={}",
+            pass ? "PASS" : "FAIL",
+            atBoundary,
+            outsideRadius,
+            belowHeight);
     }
 }
 } // namespace game

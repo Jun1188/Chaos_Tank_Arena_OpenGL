@@ -12,6 +12,29 @@
 
 namespace tmpBoxing
 {
+namespace
+{
+void drawLine2D(Shader& shader, const glm::vec2& a, const glm::vec2& b, const glm::vec3& color)
+{
+    const glm::vec3 pts[2]{{a.x, a.y, 0.0f}, {b.x, b.y, 0.0f}};
+    shader.SetUniform("objectColor", color);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(pts), pts);
+    glDrawArrays(GL_LINES, 0, 2);
+}
+
+void drawRect2D(Shader& shader, const glm::vec2& center, const glm::vec2& halfSize, const glm::vec3& color)
+{
+    const glm::vec2 bl{center.x - halfSize.x, center.y - halfSize.y};
+    const glm::vec2 br{center.x + halfSize.x, center.y - halfSize.y};
+    const glm::vec2 tr{center.x + halfSize.x, center.y + halfSize.y};
+    const glm::vec2 tl{center.x - halfSize.x, center.y + halfSize.y};
+    drawLine2D(shader, bl, br, color);
+    drawLine2D(shader, br, tr, color);
+    drawLine2D(shader, tr, tl, color);
+    drawLine2D(shader, tl, bl, color);
+}
+} // namespace
+
 PreviewRenderer::PreviewRenderer() = default;
 PreviewRenderer::~PreviewRenderer() = default;
 
@@ -106,18 +129,54 @@ void PreviewRenderer::draw(const game::PreviewFrame& frame, const glm::mat4& vie
     if (wireActive)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
-    if (!frame.lines.empty() && lineVao_ != 0)
+    if (lineVao_ != 0)
     {
-        shader_->SetUniform("model", glm::mat4{1.0f});
         glBindVertexArray(lineVao_);
         glBindBuffer(GL_ARRAY_BUFFER, lineVbo_);
 
-        for (const game::PreviewLineItem& line : frame.lines)
+        if (!frame.lines.empty())
         {
-            const glm::vec3 pts[2]{line.a, line.b};
-            shader_->SetUniform("objectColor", line.color);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(pts), pts);
-            glDrawArrays(GL_LINES, 0, 2);
+            shader_->SetUniform("model", glm::mat4{1.0f});
+            for (const game::PreviewLineItem& line : frame.lines)
+            {
+                const glm::vec3 pts[2]{line.a, line.b};
+                shader_->SetUniform("objectColor", line.color);
+                glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(pts), pts);
+                glDrawArrays(GL_LINES, 0, 2);
+            }
+        }
+
+        // Temporary 2D NDC click-prompt & reticle overlay for CP02 trickshot AimReady state.
+        if (frame.trickshot.showClickIcon)
+        {
+            const GLboolean depthWasEnabled = glIsEnabled(GL_DEPTH_TEST);
+            glDisable(GL_DEPTH_TEST);
+
+            const glm::mat4 identity{1.0f};
+            shader_->SetUniform("view", identity);
+            shader_->SetUniform("projection", identity);
+            shader_->SetUniform("model", identity);
+
+            const glm::vec3 reticleColor{0.20f, 1.0f, 0.90f};
+            const glm::vec3 iconColor{1.0f, 0.92f, 0.25f};
+
+            // Center crosshair and aim frame.
+            drawLine2D(*shader_, {-0.045f, 0.0f}, {-0.015f, 0.0f}, reticleColor);
+            drawLine2D(*shader_, {0.015f, 0.0f}, {0.045f, 0.0f}, reticleColor);
+            drawLine2D(*shader_, {0.0f, -0.075f}, {0.0f, -0.025f}, reticleColor);
+            drawLine2D(*shader_, {0.0f, 0.025f}, {0.0f, 0.075f}, reticleColor);
+            drawRect2D(*shader_, {0.0f, 0.0f}, {0.14f, 0.20f}, reticleColor);
+
+            // Stylized LMB click icon below center.
+            const glm::vec2 iconCenter{0.0f, -0.45f};
+            drawRect2D(*shader_, iconCenter, {0.045f, 0.085f}, iconColor);
+            drawLine2D(*shader_, {iconCenter.x - 0.045f, iconCenter.y + 0.01f}, {iconCenter.x + 0.045f, iconCenter.y + 0.01f}, iconColor);
+            drawLine2D(*shader_, {iconCenter.x, iconCenter.y + 0.01f}, {iconCenter.x, iconCenter.y + 0.085f}, iconColor);
+            // Highlight left button inside mouse outline.
+            drawRect2D(*shader_, {iconCenter.x - 0.022f, iconCenter.y + 0.047f}, {0.016f, 0.028f}, glm::vec3{1.0f, 0.35f, 0.20f});
+
+            if (depthWasEnabled)
+                glEnable(GL_DEPTH_TEST);
         }
 
         glBindVertexArray(0);

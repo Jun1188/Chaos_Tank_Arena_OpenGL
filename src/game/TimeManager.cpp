@@ -34,31 +34,30 @@ void InputBuffer::onKey(int key, int action)
         break;
     case GLFW_KEY_LEFT:
         arrowLeft_ = pressed;
-        if (pressed)
-            hasMouseAim_ = false;
         break;
     case GLFW_KEY_RIGHT:
         arrowRight_ = pressed;
-        if (pressed)
-            hasMouseAim_ = false;
         break;
     case GLFW_KEY_UP:
         arrowUp_ = pressed;
-        if (pressed)
-            hasMouseAim_ = false;
         break;
     case GLFW_KEY_DOWN:
         arrowDown_ = pressed;
-        if (pressed)
-            hasMouseAim_ = false;
         break;
     case GLFW_KEY_R:
+        rotateTurretHeld_ = pressed;
+        break;
+    case GLFW_KEY_F5:
         if (pressed)
             restartQueued_ = true;
         break;
     case GLFW_KEY_F1:
         if (pressed)
             toggleDebugQueued_ = true;
+        break;
+    case GLFW_KEY_F3:
+        if (pressed)
+            despawnSelectedTargetQueued_ = true;
         break;
     default:
         break;
@@ -67,8 +66,13 @@ void InputBuffer::onKey(int key, int action)
 
 void InputBuffer::onMouseButton(int button, int action)
 {
-    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
+    if (action != GLFW_PRESS)
+        return;
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
         fireQueued_ = true;
+    else if (button == GLFW_MOUSE_BUTTON_RIGHT)
+        selectTargetQueued_ = true;
 }
 
 void InputBuffer::onCursorPos(float x, float y)
@@ -83,30 +87,40 @@ void InputBuffer::onCursorPos(float x, float y)
 
     const glm::vec2 delta = next - cursorPos_;
     cursorPos_ = next;
-    if (std::abs(delta.x) + std::abs(delta.y) > 0.25f)
-        hasMouseAim_ = true;
+    rawMouseDelta_ += delta;
 }
 
 TickCommand InputBuffer::peekCommand() const
 {
     TickCommand cmd{};
     cmd.moveForward = (w_ ? 1.0f : 0.0f) - (s_ ? 1.0f : 0.0f);
-    cmd.turnYaw = (a_ ? 1.0f : 0.0f) - (d_ ? 1.0f : 0.0f);
+    cmd.moveRight = (d_ ? 1.0f : 0.0f) - (a_ ? 1.0f : 0.0f);
     cmd.manualTurretTurn = (arrowLeft_ ? 1.0f : 0.0f) - (arrowRight_ ? 1.0f : 0.0f);
     cmd.manualBarrelPitch = (arrowUp_ ? 1.0f : 0.0f) - (arrowDown_ ? 1.0f : 0.0f);
     cmd.cursorPos = cursorPos_;
-    cmd.hasMouseAim = hasMouseAim_;
+    cmd.turretAimActive = rotateTurretHeld_;
     cmd.fireRequested = fireQueued_;
+    cmd.selectTargetRequested = selectTargetQueued_;
     cmd.restartRequested = restartQueued_;
     cmd.toggleDebugRequested = toggleDebugQueued_;
+    cmd.despawnSelectedTargetRequested = despawnSelectedTargetQueued_;
     return cmd;
+}
+
+glm::vec2 InputBuffer::consumeRawMouseDelta()
+{
+    const glm::vec2 delta = rawMouseDelta_;
+    rawMouseDelta_ = glm::vec2{0.0f, 0.0f};
+    return delta;
 }
 
 void InputBuffer::consumeOneShot()
 {
     fireQueued_ = false;
+    selectTargetQueued_ = false;
     restartQueued_ = false;
     toggleDebugQueued_ = false;
+    despawnSelectedTargetQueued_ = false;
 }
 
 void InputBuffer::reset()
@@ -115,14 +129,17 @@ void InputBuffer::reset()
     s_ = false;
     a_ = false;
     d_ = false;
+    rotateTurretHeld_ = false;
     arrowLeft_ = false;
     arrowRight_ = false;
     arrowUp_ = false;
     arrowDown_ = false;
-    hasMouseAim_ = false;
+    rawMouseDelta_ = glm::vec2{0.0f, 0.0f};
     fireQueued_ = false;
+    selectTargetQueued_ = false;
     restartQueued_ = false;
     toggleDebugQueued_ = false;
+    despawnSelectedTargetQueued_ = false;
 }
 
 void TimeManager::reset()
