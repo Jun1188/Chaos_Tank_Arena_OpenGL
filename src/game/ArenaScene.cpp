@@ -168,18 +168,83 @@ void PropBody::applyHitImpulse(const glm::vec3& hitPoint, const glm::vec3& impul
     angularVel += localTorque * 9.5f + glm::vec3{2.5f, 1.8f, -2.2f};
 }
 
-void PropBody::step(float dt, float arenaHalfExtent)
+void PropBody::step(
+    float dt,
+    const RampSurface* ramp,
+    std::span<const glm::vec3> tankPositions,
+    float arenaHalfExtent)
 {
     prevPos = pos;
     prevRot = rot;
 
     const float speedSq = glm::dot(velocity, velocity);
     const float angSpeed = glm::length(angularVel);
-    if (speedSq < 1e-5f && angSpeed < 1e-4f && pos.y <= halfExtents.y + 0.01f)
+    const float surfaceCheck = ramp ? ramp->heightAt(pos.x, pos.z) : 0.0f;
+    if (speedSq < 1e-5f && angSpeed < 1e-4f && pos.y <= surfaceCheck + halfExtents.y + 0.01f && tankPositions.empty())
         return;
 
-    velocity.y -= 16.0f * dt;
-    pos += velocity * dt;
+    if (speedSq >= 1e-5f || angSpeed >= 1e-4f || pos.y > surfaceCheck + halfExtents.y + 0.01f)
+    {
+        velocity.y -= 16.0f * dt;
+        pos += velocity * dt;
+    }
+
+    const float propRadiusXZ = std::max(halfExtents.x, halfExtents.z);
+    if (ramp != nullptr)
+    {
+        const float minX = ramp->minX - propRadiusXZ;
+        const float maxX = ramp->maxX + propRadiusXZ;
+        const float minZ = ramp->endZ - propRadiusXZ;
+        const float maxZ = ramp->startZ;
+        if (pos.x > minX && pos.x < maxX && pos.z > minZ && pos.z < maxZ)
+        {
+            const float deckY = ramp->heightAt(
+                std::clamp(pos.x, ramp->minX, ramp->maxX),
+                std::clamp(pos.z, ramp->endZ, ramp->startZ));
+            if (deckY > 0.45f && prevPos.y < deckY + halfExtents.y * 0.5f)
+            {
+                const float penLeft = pos.x - minX;
+                const float penRight = maxX - pos.x;
+                const float penBack = pos.z - minZ;
+                if (penLeft <= penRight && penLeft <= penBack)
+                {
+                    pos.x = minX;
+                    velocity.x = std::min(velocity.x, 0.0f);
+                }
+                else if (penRight <= penLeft && penRight <= penBack)
+                {
+                    pos.x = maxX;
+                    velocity.x = std::max(velocity.x, 0.0f);
+                }
+                else
+                {
+                    pos.z = minZ;
+                    velocity.z = std::min(velocity.z, 0.0f);
+                }
+            }
+        }
+    }
+
+    for (const glm::vec3& tankPos : tankPositions)
+    {
+        const float minDist = propRadiusXZ + 1.32f;
+        const glm::vec2 diffXZ{pos.x - tankPos.x, pos.z - tankPos.z};
+        const float dist = glm::length(diffXZ);
+        if (dist < minDist && std::abs(pos.y - (tankPos.y + 0.6f)) < (halfExtents.y + 0.85f))
+        {
+            const glm::vec2 pushDir = (dist > 1e-4f) ? (diffXZ / dist) : glm::vec2{0.0f, -1.0f};
+            const float pen = minDist - dist;
+            pos.x += pushDir.x * pen;
+            pos.z += pushDir.y * pen;
+            const float vn = velocity.x * pushDir.x + velocity.z * pushDir.y;
+            if (vn < 0.0f)
+            {
+                velocity.x -= pushDir.x * vn * 1.25f;
+                velocity.z -= pushDir.y * vn * 1.25f;
+            }
+        }
+    }
+
     pos.x = std::clamp(pos.x, -arenaHalfExtent, arenaHalfExtent);
     pos.z = std::clamp(pos.z, -arenaHalfExtent, arenaHalfExtent);
 
@@ -195,10 +260,11 @@ void PropBody::step(float dt, float arenaHalfExtent)
         std::abs(axes[0].y) * halfExtents.x +
         std::abs(axes[1].y) * halfExtents.y +
         std::abs(axes[2].y) * halfExtents.z;
+    const float groundY = (ramp ? ramp->heightAt(pos.x, pos.z) : 0.0f) + supportHeight;
 
-    if (pos.y <= supportHeight)
+    if (pos.y <= groundY)
     {
-        pos.y = supportHeight;
+        pos.y = groundY;
         if (velocity.y < -2.2f)
         {
             velocity.y = -velocity.y * 0.35f;
@@ -265,8 +331,9 @@ void ArenaScene::reset()
     frameHits_.clear();
     explosionBursts_.clear();
     trickshot_.reset();
-    camAimOffset_ = enemies_.front().tank.position() + glm::vec3{0.0f, 0.9f, 0.0f} - player_.position();
-    player_.aimAt(player_.position() + camAimOffset_, true);
+    hoveredEnemyId_ = enemies_.front().id;
+    worldAimPoint_ = enemies_.front().tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
+    player_.aimAt(worldAimPoint_, true);
     totalTargetHits_ = 0;
     displayedColliders_ = gatherColliders(false, 0.0f);
 
@@ -306,7 +373,7 @@ void ArenaScene::updateRealTime(
         rawMouseDelta,
         rmbHeld,
         lmbHeld,
-        player_.isAirborne(),
+        player_.isAirborne() && !player_.isInRecoilHop(),
         targetAlive,
         mainCamPos,
         mainCamLookAt,
@@ -321,7 +388,7 @@ void ArenaScene::updateRealTime(
         const glm::vec3 targetCenter = targetRenderPos + glm::vec3{0.0f, 0.9f, 0.0f};
         const glm::vec3 zoomedAim = trickshot_.computeAimWorldTarget(aimOrigin, targetAlive, targetCenter);
         player_.aimAt(zoomedAim, true);
-        camAimOffset_ = zoomedAim - playerRenderPos;
+        worldAimPoint_ = zoomedAim;
     }
 }
 
@@ -329,60 +396,28 @@ AimCameraContext ArenaScene::cameraAimContext(float alpha) const
 {
     AimCameraContext ctx{};
     ctx.playerPos = player_.interpolatedPosition(alpha);
+    const glm::vec3 vel = player_.velocity();
+    ctx.planarSpeed = glm::length(glm::vec2{vel.x, vel.z});
     ctx.airborne = player_.isAirborne();
     const float surfaceY = ramp_.heightAt(ctx.playerPos.x, ctx.playerPos.z);
     ctx.heightAboveGround = std::max(0.0f, ctx.playerPos.y - surfaceY);
 
-    glm::vec3 clampedOffset = camAimOffset_;
-    const glm::vec2 offsetXZ{clampedOffset.x, clampedOffset.z};
-    const float lenXZ = glm::length(offsetXZ);
-    if (lenXZ > 1e-4f)
-    {
-        const float targetLen = std::clamp(lenXZ, 6.0f, 22.0f);
-        clampedOffset.x = (offsetXZ.x / lenXZ) * targetLen;
-        clampedOffset.z = (offsetXZ.y / lenXZ) * targetLen;
-    }
-    else
-    {
-        clampedOffset = glm::vec3{0.0f, 0.9f, -16.0f};
-    }
-    clampedOffset.y = std::clamp(clampedOffset.y, -2.5f, 4.5f);
-    const glm::vec3 freeAimPoint = ctx.playerPos + clampedOffset;
-
     if (const EnemyEntity* selected = findAliveEnemy(trickshot_.selectedTargetId()))
     {
-        const glm::vec3 targetCenter = selected->tank.interpolatedPosition(alpha) + glm::vec3{0.0f, 0.9f, 0.0f};
-        ctx.aimPoint = glm::mix(freeAimPoint, targetCenter, 0.72f);
+        ctx.aimPoint = selected->tank.interpolatedPosition(alpha) + glm::vec3{0.0f, 0.9f, 0.0f};
+        ctx.hasTargetFocus = true;
         return ctx;
     }
 
-    const glm::vec2 aimDirXZ = glm::normalize(glm::vec2{clampedOffset.x, clampedOffset.z});
-    float bestAssistWeight = 0.0f;
-    glm::vec3 bestEnemyCenter{0.0f};
-    for (const EnemyEntity& enemy : enemies_)
+    if (const EnemyEntity* hovered = findAliveEnemy(hoveredEnemyId_))
     {
-        if (!enemy.tank.alive())
-            continue;
-        const glm::vec3 center = enemy.tank.interpolatedPosition(alpha) + glm::vec3{0.0f, 0.9f, 0.0f};
-        const glm::vec2 toEnemyXZ{center.x - ctx.playerPos.x, center.z - ctx.playerPos.z};
-        const float distXZ = glm::length(toEnemyXZ);
-        if (distXZ < 2.5f)
-            continue;
-        const float alignment = glm::dot(aimDirXZ, toEnemyXZ / distXZ);
-        if (alignment > 0.62f)
-        {
-            const float w = ((alignment - 0.62f) / 0.38f) * 0.36f;
-            if (w > bestAssistWeight)
-            {
-                bestAssistWeight = w;
-                bestEnemyCenter = center;
-            }
-        }
+        ctx.aimPoint = hovered->tank.interpolatedPosition(alpha) + glm::vec3{0.0f, 0.9f, 0.0f};
+        ctx.hasTargetFocus = true;
+        return ctx;
     }
 
-    ctx.aimPoint = (bestAssistWeight > 0.0f)
-        ? glm::mix(freeAimPoint, bestEnemyCenter, bestAssistWeight)
-        : freeAimPoint;
+    ctx.aimPoint = worldAimPoint_;
+    ctx.hasTargetFocus = false;
     return ctx;
 }
 
@@ -442,31 +477,52 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
         enemy.tank.beginTick(dt);
 
     const EnemyEntity* selectedTarget = findAliveEnemy(trickshot_.selectedTargetId());
+    const glm::vec3 prevPlayerPos = player_.position();
 
     // Resolve current world aim point & horizontal aim forward BEFORE hull alignment (r) and driving (WASD).
     const bool manualAimThisTick =
         !trickshot_.isZoomActive() && (cmd.manualTurretTurn != 0.0f || cmd.manualBarrelPitch != 0.0f);
-    glm::vec3 activeAimPoint = player_.position() + camAimOffset_;
+    glm::vec3 activeAimPoint = worldAimPoint_;
     if (trickshot_.isZoomActive())
     {
         const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.35f, 0.0f};
         const bool targetAlive = (selectedTarget != nullptr);
         const glm::vec3 targetCenter = targetAlive ? (selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f}) : glm::vec3{0.0f};
         activeAimPoint = trickshot_.computeAimWorldTarget(aimOrigin, targetAlive, targetCenter);
-        camAimOffset_ = activeAimPoint - player_.position();
+        worldAimPoint_ = activeAimPoint;
     }
     else if (manualAimThisTick)
     {
         player_.adjustManualAim(cmd.manualTurretTurn, cmd.manualBarrelPitch, dt);
         const TankPose updatedPose = player_.evaluatePose();
-        activeAimPoint = updatedPose.muzzleOrigin + updatedPose.muzzleForward * 16.0f;
-        camAimOffset_ = activeAimPoint - player_.position();
+        activeAimPoint = updatedPose.muzzleOrigin + updatedPose.muzzleForward * 18.0f;
+        worldAimPoint_ = activeAimPoint;
+        hoveredEnemyId_ = kInvalidEntityId;
     }
     else if (cmd.hasMouseAim && view.valid)
     {
-        activeAimPoint = computeMouseAimPoint(cmd.cursorPos, view);
-        if (cmd.cursorMoved)
-            camAimOffset_ = activeAimPoint - player_.position();
+        EntityId rayHoveredEnemy = kInvalidEntityId;
+        activeAimPoint = computeMouseAimPoint(cmd.cursorPos, view, &rayHoveredEnemy);
+        if (rayHoveredEnemy != kInvalidEntityId)
+        {
+            hoveredEnemyId_ = rayHoveredEnemy;
+            if (const EnemyEntity* hov = findAliveEnemy(hoveredEnemyId_))
+                worldAimPoint_ = hov->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
+        }
+        else if (cmd.cursorMoved)
+        {
+            hoveredEnemyId_ = kInvalidEntityId;
+            worldAimPoint_ = activeAimPoint;
+        }
+        else if (const EnemyEntity* hov = findAliveEnemy(hoveredEnemyId_))
+        {
+            worldAimPoint_ = hov->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
+        }
+    }
+    else if (const EnemyEntity* hov = findAliveEnemy(hoveredEnemyId_))
+    {
+        worldAimPoint_ = hov->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
+        activeAimPoint = worldAimPoint_;
     }
 
     glm::vec3 aimForwardXZ{
@@ -474,7 +530,12 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
         0.0f,
         activeAimPoint.z - player_.position().z};
     if (glm::dot(aimForwardXZ, aimForwardXZ) < 0.16f)
-        aimForwardXZ = glm::vec3{camAimOffset_.x, 0.0f, camAimOffset_.z};
+    {
+        aimForwardXZ = glm::vec3{
+            worldAimPoint_.x - player_.position().x,
+            0.0f,
+            worldAimPoint_.z - player_.position().z};
+    }
     if (glm::dot(aimForwardXZ, aimForwardXZ) < 1e-4f)
         aimForwardXZ = player_.interpolatedForwardXZ(1.0f);
     else
@@ -492,7 +553,7 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
 
     if (cmd.explosionToggleRequested)
     {
-        if (player_.isAirborne())
+        if (player_.isAirborne() && !player_.isInRecoilHop())
         {
             trickshot_.toggleMildAirborneSlow();
             std::println("[CP02] Airborne Mild Slow Toggle (B) | TimeScale={:.2f}x", trickshot_.timeScale());
@@ -510,27 +571,76 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
         }
     }
 
-    barricade_.step(dt, kFloorHalfWidth - 2.0f);
-    const OBB solidObstacles[1]{barricade_.toOBB(1.0f)};
+    std::vector<glm::vec3> tankCenters{};
+    tankCenters.reserve(1 + enemies_.size());
+    if (player_.alive())
+        tankCenters.push_back(player_.position());
+    for (const EnemyEntity& enemy : enemies_)
+    {
+        if (enemy.tank.alive())
+            tankCenters.push_back(enemy.tank.position());
+    }
+    barricade_.step(dt, &ramp_, tankCenters, kFloorHalfWidth - 2.0f);
+
+    std::vector<OBB> playerObstacles{};
+    playerObstacles.reserve(1 + enemies_.size());
+    playerObstacles.push_back(barricade_.toOBB(1.0f));
+    for (const EnemyEntity& enemy : enemies_)
+    {
+        if (enemy.tank.alive())
+            playerObstacles.push_back(enemy.tank.evaluatePose().bodyOBB);
+    }
+
     player_.applyDrive(
         cmd.moveForward,
         cmd.moveRight,
         cmd.boostActive,
         dt,
         &ramp_,
-        solidObstacles,
+        playerObstacles,
         kFloorHalfWidth - 2.0f);
 
-    // Step comic hit physics for enemies as well.
-    for (EnemyEntity& enemy : enemies_)
+    // Prevent driving straight over an un-locked ground aim point from flipping the sightline 180 degrees.
+    if (selectedTarget == nullptr && hoveredEnemyId_ == kInvalidEntityId)
     {
+        const glm::vec2 toAimAfter{
+            worldAimPoint_.x - player_.position().x,
+            worldAimPoint_.z - player_.position().z};
+        const float distAfter = glm::length(toAimAfter);
+        if (distAfter < 5.5f)
+        {
+            glm::vec2 prevSight{
+                worldAimPoint_.x - prevPlayerPos.x,
+                worldAimPoint_.z - prevPlayerPos.z};
+            const float prevLen = glm::length(prevSight);
+            prevSight = (prevLen > 1e-4f) ? (prevSight / prevLen) : glm::vec2{0.0f, -1.0f};
+            worldAimPoint_.x = player_.position().x + prevSight.x * 5.5f;
+            worldAimPoint_.z = player_.position().z + prevSight.y * 5.5f;
+        }
+    }
+
+    // Step comic hit physics for enemies with full obstacle & player collision.
+    for (std::size_t i = 0; i < enemies_.size(); ++i)
+    {
+        EnemyEntity& enemy = enemies_[i];
+        std::vector<OBB> enemyObstacles{};
+        enemyObstacles.reserve(1 + enemies_.size());
+        enemyObstacles.push_back(barricade_.toOBB(1.0f));
+        if (player_.alive())
+            enemyObstacles.push_back(player_.evaluatePose().bodyOBB);
+        for (std::size_t j = 0; j < enemies_.size(); ++j)
+        {
+            if (i != j && enemies_[j].tank.alive())
+                enemyObstacles.push_back(enemies_[j].tank.evaluatePose().bodyOBB);
+        }
+
         enemy.tank.applyDrive(
             0.0f,
             0.0f,
             false,
             dt,
             &ramp_,
-            solidObstacles,
+            enemyObstacles,
             kFloorHalfWidth - 2.0f);
     }
 
@@ -544,10 +654,12 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
         const glm::vec3 targetCenter = targetAlive ? (selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f}) : glm::vec3{0.0f};
         const glm::vec3 zoomedAim = trickshot_.computeAimWorldTarget(aimOrigin, targetAlive, targetCenter);
         player_.aimAt(zoomedAim, true);
-        camAimOffset_ = zoomedAim - player_.position();
+        worldAimPoint_ = zoomedAim;
     }
     else if (!manualAimThisTick)
     {
+        if (cmd.hasMouseAim && view.valid)
+            activeAimPoint = computeMouseAimPoint(cmd.cursorPos, view);
         player_.aimAt(activeAimPoint);
     }
 
@@ -628,8 +740,14 @@ std::vector<TraceCollider> ArenaScene::gatherColliders(bool interpolated, float 
     return colliders;
 }
 
-glm::vec3 ArenaScene::computeMouseAimPoint(const glm::vec2& cursorPos, const PresentedView& view) const
+glm::vec3 ArenaScene::computeMouseAimPoint(
+    const glm::vec2& cursorPos,
+    const PresentedView& view,
+    EntityId* outHoveredEnemyId) const
 {
+    if (outHoveredEnemyId != nullptr)
+        *outHoveredEnemyId = kInvalidEntityId;
+
     const float scaleX = (view.windowSize.x > 1.0f) ? (static_cast<float>(view.viewport.z) / view.windowSize.x) : 1.0f;
     const float scaleY = (view.windowSize.y > 1.0f) ? (static_cast<float>(view.viewport.w) / view.windowSize.y) : 1.0f;
     const float fbX = static_cast<float>(view.viewport.x) + cursorPos.x * scaleX;
@@ -654,6 +772,31 @@ glm::vec3 ArenaScene::computeMouseAimPoint(const glm::vec2& cursorPos, const Pre
     const SegmentHit hit = Physics::traceSegment(nearPt, rayEnd, colliders, player_.id());
 
     glm::vec3 target = hit.hit ? hit.point : (nearPt + rayDir * 45.0f);
+    if (outHoveredEnemyId != nullptr)
+    {
+        if (hit.hit && hit.entityId != kInvalidEntityId && hit.part != PartKind::Terrain && hit.part != PartKind::Prop)
+        {
+            *outHoveredEnemyId = hit.entityId;
+        }
+        else
+        {
+            float bestDistSq = 2.2f * 2.2f;
+            for (const EnemyEntity& enemy : enemies_)
+            {
+                if (!enemy.tank.alive())
+                    continue;
+                const glm::vec2 d{
+                    target.x - enemy.tank.position().x,
+                    target.z - enemy.tank.position().z};
+                const float dSq = glm::dot(d, d);
+                if (dSq < bestDistSq)
+                {
+                    bestDistSq = dSq;
+                    *outHoveredEnemyId = enemy.id;
+                }
+            }
+        }
+    }
 
     const glm::vec3 fromTank = target - player_.position();
     const float horizDistSq = fromTank.x * fromTank.x + fromTank.z * fromTank.z;

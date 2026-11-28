@@ -248,34 +248,35 @@ void Application::Update()
     const float renderAlpha = g_Runtime.timeManager.alpha();
     const float clampedRawDt = std::clamp(deltaTime, 0.0f, 0.1f);
 
-    // Desensitized, two-stage smoothed quarter-view camera roughly oriented toward current aim target/direction
-    // while accounting for WASD, B jump, and recoil displacement/sightline.
+    // Quarter-view camera that smoothly orbits along the (Player -> World Aim / Enemy) sightline during WASD movement,
+    // while filtering subtle recoil hops and accommodating airborne elevation.
     const game::AimCameraContext camCtx = g_Runtime.scene.cameraAimContext(renderAlpha);
 
     const glm::vec2 deltaXZ{
         camCtx.playerPos.x - g_Runtime.quarterAnchorPos.x,
         camCtx.playerPos.z - g_Runtime.quarterAnchorPos.z};
     const float distXZ = glm::length(deltaXZ);
-    const float deadzoneT = std::clamp((distXZ - 1.8f) / 4.2f, 0.0f, 1.0f);
+    const float deadzoneT = std::clamp((distXZ - 1.1f) / 3.6f, 0.0f, 1.0f);
     const float smoothDeadzone = deadzoneT * deadzoneT * (3.0f - 2.0f * deadzoneT);
-    const float outerLeashT = std::clamp((distXZ - 5.5f) / 3.5f, 0.0f, 1.0f);
-    const float anchorHorizRate = glm::mix(0.32f, 2.25f, smoothDeadzone) + outerLeashT * 2.0f;
+    const float outerLeashT = std::clamp((distXZ - 5.0f) / 3.2f, 0.0f, 1.0f);
+    const float anchorHorizRate = glm::mix(0.65f, 2.75f, smoothDeadzone) + outerLeashT * 2.2f;
     const float anchorHorizBlend = 1.0f - std::exp(-anchorHorizRate * clampedRawDt);
     g_Runtime.quarterAnchorPos.x = glm::mix(g_Runtime.quarterAnchorPos.x, camCtx.playerPos.x, anchorHorizBlend);
     g_Runtime.quarterAnchorPos.z = glm::mix(g_Runtime.quarterAnchorPos.z, camCtx.playerPos.z, anchorHorizBlend);
 
-    // Filter out subtle ground recoil tilt bobbing (< 0.45m) while smoothly tracking airborne B/ramp elevation.
+    // Filter out compact ground-recoil hops (< 0.85m above floor) from vertical camera bounce while tracking high B/ramp jumps.
+    const bool highAirborne = camCtx.airborne && (camCtx.heightAboveGround > 0.85f);
     const float rawDeltaY = camCtx.playerPos.y - g_Runtime.quarterAnchorPos.y;
-    const float verticalTargetY = (!camCtx.airborne && std::abs(rawDeltaY) < 0.45f)
+    const float verticalTargetY = (!highAirborne && std::abs(rawDeltaY) < 0.85f)
         ? g_Runtime.quarterAnchorPos.y
-        : (camCtx.airborne ? (camCtx.playerPos.y * 0.62f) : camCtx.playerPos.y);
-    const float anchorVertRate = camCtx.airborne ? 1.55f : 2.10f;
+        : (highAirborne ? (camCtx.playerPos.y * 0.62f) : camCtx.playerPos.y);
+    const float anchorVertRate = highAirborne ? 1.65f : 2.15f;
     g_Runtime.quarterAnchorPos.y = glm::mix(
         g_Runtime.quarterAnchorPos.y,
         verticalTargetY,
         1.0f - std::exp(-anchorVertRate * clampedRawDt));
 
-    const float targetAirH = camCtx.airborne ? camCtx.heightAboveGround : 0.0f;
+    const float targetAirH = highAirborne ? camCtx.heightAboveGround : 0.0f;
     const float airSmoothRate = (targetAirH > g_Runtime.smoothedAirHeight) ? 1.75f : 2.35f;
     g_Runtime.smoothedAirHeight = glm::mix(
         g_Runtime.smoothedAirHeight,
@@ -288,34 +289,43 @@ void Application::Update()
         targetSpread,
         1.0f - std::exp(-1.90f * clampedRawDt));
 
+    // Blend 78% live player XZ so WASD strafing (e.g. WA while aiming at enemy) immediately & progressively rotates the sightline.
+    const glm::vec2 sightOriginXZ = glm::mix(
+        glm::vec2{g_Runtime.quarterAnchorPos.x, g_Runtime.quarterAnchorPos.z},
+        glm::vec2{camCtx.playerPos.x, camCtx.playerPos.z},
+        0.78f);
     const glm::vec2 aimVecXZ{
-        camCtx.aimPoint.x - g_Runtime.quarterAnchorPos.x,
-        camCtx.aimPoint.z - g_Runtime.quarterAnchorPos.z};
+        camCtx.aimPoint.x - sightOriginXZ.x,
+        camCtx.aimPoint.z - sightOriginXZ.y};
     if (glm::length(aimVecXZ) > 1.5f)
     {
         const float rawAimYaw = std::atan2(-aimVecXZ.x, -aimVecXZ.y);
         const float diff = wrapAnglePiMain(rawAimYaw - g_Runtime.currentQuarterYaw);
-        constexpr float kComfortConeRad = 0.22f;
+        const bool activeOrbit = camCtx.hasTargetFocus || (camCtx.planarSpeed > 0.45f);
+        const float microDeadzone = activeOrbit ? 0.0f : 0.06f;
+
         float yawDrive = 0.0f;
-        if (std::abs(diff) <= kComfortConeRad)
+        if (std::abs(diff) <= microDeadzone)
         {
-            yawDrive = diff * 0.16f;
+            yawDrive = diff * 0.25f;
         }
         else
         {
-            const float excess = diff - std::copysign(kComfortConeRad, diff);
-            yawDrive = std::copysign(kComfortConeRad * 0.16f, diff) + excess * 0.78f;
+            const float excess = diff - std::copysign(microDeadzone, diff);
+            yawDrive = std::copysign(microDeadzone * 0.25f, diff) + excess * (activeOrbit ? 0.94f : 0.80f);
         }
 
         const float desiredYaw = wrapAnglePiMain(g_Runtime.currentQuarterYaw + yawDrive);
+        const float midRate = activeOrbit ? 2.15f : 1.25f;
         const float midDiff = wrapAnglePiMain(desiredYaw - g_Runtime.midQuarterYaw);
         g_Runtime.midQuarterYaw = wrapAnglePiMain(
-            g_Runtime.midQuarterYaw + midDiff * (1.0f - std::exp(-1.25f * clampedRawDt)));
+            g_Runtime.midQuarterYaw + midDiff * (1.0f - std::exp(-midRate * clampedRawDt)));
     }
 
+    const float finalRate = (camCtx.hasTargetFocus || camCtx.planarSpeed > 0.45f) ? 2.55f : 1.65f;
     const float finalYawDiff = wrapAnglePiMain(g_Runtime.midQuarterYaw - g_Runtime.currentQuarterYaw);
     g_Runtime.currentQuarterYaw = wrapAnglePiMain(
-        g_Runtime.currentQuarterYaw + finalYawDiff * (1.0f - std::exp(-1.75f * clampedRawDt)));
+        g_Runtime.currentQuarterYaw + finalYawDiff * (1.0f - std::exp(-finalRate * clampedRawDt)));
 
     glm::vec3 targetMainPos{};
     glm::vec3 targetMainLookAt{};
@@ -328,8 +338,8 @@ void Application::Update()
         targetMainPos,
         targetMainLookAt);
 
-    const float posBlend = 1.0f - std::exp(-2.35f * clampedRawDt);
-    const float lookBlend = 1.0f - std::exp(-2.75f * clampedRawDt);
+    const float posBlend = 1.0f - std::exp(-2.65f * clampedRawDt);
+    const float lookBlend = 1.0f - std::exp(-3.10f * clampedRawDt);
     g_Runtime.mainCamPos = glm::mix(g_Runtime.mainCamPos, targetMainPos, posBlend);
     g_Runtime.mainCamLookAt = glm::mix(g_Runtime.mainCamLookAt, targetMainLookAt, lookBlend);
 

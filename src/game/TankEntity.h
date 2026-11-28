@@ -127,6 +127,7 @@ public:
     int maxHp() const { return spec_.maxHp; }
     bool alive() const { return hp_ > 0; }
     bool isAirborne() const { return curr_.airborne; }
+    bool isInRecoilHop() const { return curr_.airborne && recoilHopActive_; }
     bool tookOffThisTick() const { return tookOffThisTick_; }
     float heightAboveGround(const RampSurface* ramp = nullptr) const;
     float cooldownRemaining() const { return cooldownRemaining_; }
@@ -161,6 +162,7 @@ private:
     float cooldownRemaining_{0.0f};
     bool tookOffThisTick_{false};
     int airRecoilCount_{0};
+    bool recoilHopActive_{false};
     bool groundRollActive_{false};
     bool recoilSettleActive_{false};
     float recoilSettleElapsed_{0.0f};

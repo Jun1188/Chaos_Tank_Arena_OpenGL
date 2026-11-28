@@ -14,13 +14,13 @@
 | --- | --- |
 | `src/game/TimeManager.h`, `src/game/TimeManager.cpp` | `Shift` 가속 돌진 홀드(`boostActive`), 좌·우클릭 홀드 및 해제 이벤트(`isLmbHeld`, `isRmbHeld`, `lmbReleased`, `rmbReleased`), 실제 마우스 이동 감지(`cursorMoved`), `GLFW_LOCK_KEY_MODS` 기반 소문자 `r`(`alignHullRequested`: 차체 자세 원위치)과 대문자 `R`(`restartRequested`: 장면 리셋, 보조 `F5`) 구분 처리 추가 |
 | `src/game/TrickshotController.h`, `src/game/TrickshotController.cpp` | `ZoomTriggerSource`(`None`, `RightMouse`, `LeftHold`) 도입: 지상·체공 공통 우클릭 홀드 즉시 줌인(`FOV 45° → 34°`, `0.32x` 슬로우) 및 좌클릭 시 즉시 줌·슬로우 해제 후 발사, 좌클릭 `1.2초` 이상 홀드 시 줌인·슬로우 유지 및 버튼 해제 시 복귀·발사, `B` 체공 시 무줌인 약한 슬로우(`0.55x`) 토글, 5차 다항식(`smootherstep`) 줌 전환 및 둔감한 위치 추적(`camTrackPos_`)·깊이 검사용 `zoomAlphaFade`·`zoomFocusPoint` 산출 |
-| `src/game/TankEntity.h`, `src/game/TankEntity.cpp` | 소문자 `r` 입력 시에만 현재 조준점을 향하도록 차체 정자세 및 `WASD` 전방 기준축(`driveBasisYaw_`)을 원위치 정렬(`resetHullToAim`, 이후 `W` 입력 시 해당 기준 전방으로 주행하며 `W` 자체는 실시간 조준점을 자동 추종하지 않음), `Shift` 가속 돌진(`2.15x`), 지상 미세 구름 반동과 `log1p` 복귀, 공중 연사 반동 감쇠(`0.55^n`), 고도(`4.5m` 초과) 비례 중력·하강 가속(`1.35x`) 및 밑면 착지 보간, 피격 충격 반응(`applyHitImpulse`) 구현 |
+| `src/game/TankEntity.h`, `src/game/TankEntity.cpp` | 소문자 `r` 입력 시에만 현재 조준점을 향하도록 차체 정자세 및 `WASD` 전방 기준축(`driveBasisYaw_`) 원위치 정렬(`resetHullToAim`), 회전 차체 3D `OBB` 8-꼭짓점 기준 정확한 지면 지지 높이(`minBodyYAboveSurface`) 산출·서브틱 클램핑으로 바닥 파고듦 해결, 지상 사격 시 소폭 허공+후방 체공 후 밑면 착지 보간(`recoilHopActive_`, `log1p` 정자세 안착), 전·후방 2-구체 vs 회전 `OBB` 및 경사로 측·후면 벽 충돌 보강(`resolveSolidObstacles`, `resolveRampSideAndBackWalls`), 공중 연사 반동 감쇠(`0.55^n`)·고도 중력·피격 충격(`applyHitImpulse`) 구현 |
 | `src/game/Physics.h` | 사물 충돌·피격 구분을 위한 `PartKind::Prop` 열거값 추가 |
-| `src/game/ArenaScene.h`, `src/game/ArenaScene.cpp` | 바리케이드를 동적 강체(`PropBody`)로 전환해 포탄 피격 시 적 탱크와 함께 TABS식 코믹 회전·바운스·지면 안착 동작 연결, 카메라 자기회전 피드백 없이 조준 대상·방향을 전달하는 `AimCameraContext`(`cameraAimContext`) 추가, `PreviewFrame`에 줌 알파블렌딩 페이드·타겟 좌표·객체별 바운딩 중심/반경 및 불투명 유지 플래그 전달 |
+| `src/game/ArenaScene.h`, `src/game/ArenaScene.cpp` | 바리케이드 동적 강체(`PropBody`)의 피격 코믹 물리 및 탱크·경사로 상호 밀어내기 연결, 월드 고정 조준점(`worldAimPoint_`) 및 커서 근접 적(`hoveredEnemyId_`, 반경 `2.2m`) 자동 추적으로 `WASD` 이동 시 시선 각도가 자연스럽게 변하는 `AimCameraContext` 구성, 플레이어↔적↔바리케이드 전 구간 장애물 충돌 전달 |
 | `assets/tanks/tank.fs` | 부위별 반투명 렌더링을 위한 `uniform float objectAlpha;` 추가 |
 | `src/tmpBoxing/SandTankModel.h`, `src/tmpBoxing/SandTankModel.cpp` | `TankRenderFilter`(`All`, `BarrelOnly`, `NonBarrelOnly`) 및 `alpha` 인자 지원으로 줌인 시 플레이어 포신 불투명 유지·차체/포탑/궤도 선택 반투명 드로우 분리 |
 | `src/tmpBoxing/PreviewRenderer.h`, `src/tmpBoxing/PreviewRenderer.cpp` | 프레임워크 `transparentColor.fs` 연결 및 카메라-타겟 뷰 공간 깊이 비교(`nearestDepth < targetDepth - 0.35f`) 기반 2-Pass 렌더링(1패스 불투명 `glDepthMask(GL_TRUE)`, 2패스 시야 차폐 파츠·사물 `alpha = 0.14` + `glDepthMask(GL_FALSE)` + `GL_BLEND`) 구현 및 GL 상태 복원 |
-| `src/main.cpp` | 차체(`WASD`) 회전과 분리해 키 조작 반응성을 둔감화(`1.8m` 소프트 데드존·지상 미세 반동 필터·2단 감쇠 보간)하고, 현재 조준 대상·방향을 대략적으로(`±12.6°` 완충각 + 2단 각도 보간) 가리키면서 `WASD`·`B` 체공 고도·반동 변위에 맞춰 거리·높이·시야 리드(`lookAt`)를 부드럽게 보간하는 쿼터뷰 메인 카메라 구현 |
+| `src/main.cpp` | 플레이어 실시간 위치(`78%`)에서 월드 조준점·적을 향하는 시선 벡터를 추적해 `WA` 등 이동 사격 시 적 방향으로 부드럽게 공전 보간(`2.15/s → 2.55/s` 2단 감쇠)하고, 지상 반동 소폭 체공(`< 0.85m`)의 수직 흔들림은 걸러내면서 `B` 고고도 체공 시 거리·높이·`lookAt`을 확장하는 쿼터뷰 메인 카메라 구현 |
 
 ### 1.2 현재 조작 체계 (`game/cp02` 최신)
 
@@ -54,11 +54,12 @@
 
 ---
 
-## 3. 이후 작업 내역 정리 (`11/28 마무리 ~ 12/06 제출`)
+## 3. 이후 작업 내역 정리 (`CP03 ~ CP07` · `11/29 ~ 12/06`)
 
-| 단계 | 일정 기준 | 대상 경로 / 범위 | 세부 작업 내역 |
+| 단계 | 일정 기준 | 대상 경로 / 범위 | 세부 작업 내역 (선행 구현 중복 제거 및 신규 보강 반영) |
 | --- | --- | --- | --- |
-| **1단계: CP02 실기 검증·마무리** | `11/28` | `src/game/`, `src/tmpBoxing/`, `docs/` | 사용자 VS `Debug \| x64` 플레이 테스트 피드백 반영(홀드 시간 `1.2s`, 깊이 임계값 `0.35m`, 반투명도 `0.14`, 반동·중력 계수 미세 튜닝), `F2` 단위 검사 확인 후 `game/cp02` 커밋·푸시 |
-| **2단계: 팀 협의 및 공용 경계 확정** | `11/29 저녁` | `src/shared/RenderBridge.h`, `src/main.cpp` | 박재성(`namespace render`)과 11/28 구현 결과 공유 및 세부 경계 조율(적 타겟/AI 분담, 카메라 줌·슬로우 연출 제어권, 깊이 알파블렌딩 정보 전달 방식, 모델·소품 식별자). `STL`·`GLM` 순수 값 타입 기반 `RenderBridge.h`(프레임 스냅샷·카메라/줌 상태·`FXEvent`) 합의 및 PR 상호 검토 |
-| **3단계: 렌더 브리지 연결 및 게임 루프 완성** | `11/30 ~ 12/03` | `src/game/`, `src/shared/`, `src/main.cpp` | ① `ArenaScene` 스냅샷을 `RenderBridge.h` 규격으로 출력해 `render` 모듈 백엔드와 연결(`tmpBoxing` 분리·대체)<br>② 상호작용 소품 확장(폭발 드럼통 반경 충격파·연쇄 폭발 클램핑) 및 팀 합의 범위에 맞춘 적 교전·웨이브 클리어·재시작 루프 완성<br>③ ImGui를 사용하지 않는 OpenGL 2D 직교 투영 기반 `GameHUD`(체력·부스트·슬로우/줌 상태·잔여 적·결과 표시) 구현 |
-| **4단계: 통합 QA·패키징·제출** | `12/04 ~ 12/06` | 전체 저장소 / `Release \| x64` | ① 통합 회귀 점검(슬로우 해제 시 카메라 튐, 다중 폭발 시 속도 클램핑, 한글/상대 경로 리소스 로드, 재시작 `R` 및 종료 시 GL 자원 해제)<br>② 별도 클린 폴더에서 `Release \| x64` 실행파일·DLL·`assets/` 단독 구동 검증<br>③ 시연 영상·발표 자료·최종 보고서 작성 및 **12/06** 최종 제출 |
+| **CP03: 팀 렌더 연결** | `11/29 저녁` | `src/shared/RenderBridge.h`, `src/main.cpp` | 박재성(`namespace render`)과 공용 스냅샷 계약 확정: 기존 부위 행렬·`CameraRequest`·`FXEvent`·`PresentedView` 외에 CP02에서 선행 구현된 **궤도 바퀴 회전(`wheelSpinRad`), 줌 깊이 차폐 알파블렌딩 정보(`zoomAlphaFade`, `zoomTargetPos`, 포신 불투명 분리)** 전달 방식 합의 및 PR 검토 |
+| **CP04: 코믹 물리 정교화 & 감각·조준 개선** | `11/30 ~ 12/01` | `src/game/` | ① 기존 `TankEntity`·`PropBody` 반동/충돌을 `Physics::applyImpulseAt`·`resolveContacts`(SAT·모서리 착지·드럼통 폭발 1회 보장)로 통합<br>② **[추가] 포탄 반동 타격감 보강**: 포신 축 방향 주퇴복좌(Kickback), 발사 순간 카메라 임팩트/미세 셰이크, 조준각 비대칭 차체 피칭·롤링 강화<br>③ **[추가] 체공 시 밋밋함 해소**: 상승·정점·급하강 리듬 대비 강화, 공중 사격·`Shift` 대시 시 궤도 꺾임/뱅크 연출 및 착지 충격(`Landing Slam`) 이벤트 추가<br>④ **[추가] 유저 친화적 조준(Aiming UX)**: 적 실루엣 인접 소프트 에임 보정(고저각 탄도 보정), 3D 예상 탄착점 링/마커 및 명중 가능 시 조준선 색상 피드백 도입 |
+| **CP05: 적 관리와 행동(BT)** | `12/02` | `src/game/` | 다중 적 스폰·사망 정리(`spawnEnemy`) 및 4단계 행동 트리(`tickBrain`: 공중/피격 복구 중 사격 정지 → 시야·사거리 사격/드럼통 유폭 → 마지막 감지 위치 추적 → 순찰) 구현 |
+| **CP06: 모델·HUD·효과 통합** | `12/03 ~ 12/04` | `src/game/`, `src/render/` | Meshy 적·소품 모델 피벗 정합(`ModelRegistry`), OpenGL 2D Ortho `GameHUD`(유저 친화적 동적 조준원·탄착 피드백·HP·부스트·`1.2s` 차징 게이지·잔여 적), 명중 접점·발사·착지 `FXEvent` 연결 |
+| **CP07: 제출 후보 검증·패키징** | `12/05 ~ 12/06` | 전체 저장소 / `Release \| x64` | GLSL UTF-8 BOM 런타임 제거·`utf8.manifest` 기반 타 PC `Release \| x64` 리소스 검증, 대문자 `R`(`Shift+R`/`F5`) 연속 재시작·종료 무잔류 확인 및 최종 산출물 제출 |

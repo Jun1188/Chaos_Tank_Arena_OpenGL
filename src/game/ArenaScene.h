@@ -42,7 +42,11 @@ struct PropBody
     OBB toOBB(float alpha = 1.0f) const;
     void reset(EntityId propId, const glm::vec3& center, const glm::vec3& extents);
     void applyHitImpulse(const glm::vec3& hitPoint, const glm::vec3& impulseDir);
-    void step(float dt, float arenaHalfExtent = 23.0f);
+    void step(
+        float dt,
+        const RampSurface* ramp = nullptr,
+        std::span<const glm::vec3> tankPositions = {},
+        float arenaHalfExtent = 23.0f);
 };
 
 struct PreviewBoxItem
@@ -97,6 +101,8 @@ struct AimCameraContext
 {
     glm::vec3 playerPos{0.0f};
     glm::vec3 aimPoint{0.0f, 0.9f, -10.0f};
+    float planarSpeed{0.0f};
+    bool hasTargetFocus{false};
     bool airborne{false};
     float heightAboveGround{0.0f};
 };
@@ -135,7 +141,10 @@ private:
     EnemyEntity* findAliveEnemy(EntityId id);
     const EnemyEntity* findAliveEnemy(EntityId id) const;
     std::vector<TraceCollider> gatherColliders(bool interpolated, float alpha) const;
-    glm::vec3 computeMouseAimPoint(const glm::vec2& cursorPos, const PresentedView& view) const;
+    glm::vec3 computeMouseAimPoint(
+        const glm::vec2& cursorPos,
+        const PresentedView& view,
+        EntityId* outHoveredEnemyId = nullptr) const;
     void firePlayerCannon(bool ignoreCooldown);
     void stepProjectiles(float dt);
 
@@ -160,7 +169,8 @@ private:
     };
 
     std::vector<ExplosionBurst> explosionBursts_{};
-    glm::vec3 camAimOffset_{0.0f, 0.9f, -20.0f};
+    glm::vec3 worldAimPoint_{0.0f, 0.9f, -10.0f};
+    EntityId hoveredEnemyId_{kInvalidEntityId};
     EntityId nextEntityId_{1};
     std::uint32_t totalTargetHits_{0};
     bool debugOverlay_{true};
