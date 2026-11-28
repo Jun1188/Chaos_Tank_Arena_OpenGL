@@ -56,6 +56,13 @@ void resolveObstaclePenetrationXZ(float& x, float& z, float bodyRadius, std::spa
         }
     }
 }
+
+float groundClearanceForTilt(const glm::quat& rot, const TankSpec& spec)
+{
+    const glm::vec3 hullUp = rot * glm::vec3{0.0f, 1.0f, 0.0f};
+    const float tiltFactor = std::clamp(1.0f - hullUp.y, 0.0f, 1.0f);
+    return tiltFactor * (spec.bodyHalfExtents.y * 0.85f);
+}
 } // namespace
 
 float RampSurface::heightAt(float x, float z) const
@@ -115,6 +122,19 @@ void TankEntity::reset(EntityId id, const glm::vec3& groundPos, float bodyYawRad
     hp_ = spec_.maxHp;
     cooldownRemaining_ = 0.0f;
     tookOffThisTick_ = false;
+    airRecoilCount_ = 0;
+    groundRollActive_ = false;
+    recoilSettleActive_ = false;
+    recoilSettleElapsed_ = 0.0f;
+    recoilStartRot_ = curr_.bodyRot;
+    hullAlignActive_ = false;
+    hullAlignElapsed_ = 0.0f;
+    hullAlignStartYaw_ = curr_.bodyYaw;
+    hullAlignTargetYaw_ = curr_.bodyYaw;
+    hullAlignStartRot_ = curr_.bodyRot;
+    driveBasisYaw_ = curr_.bodyYaw;
+    recoilSlideVelXZ_ = glm::vec3{0.0f};
+    boostBlend_ = 0.0f;
 }
 
 void TankEntity::beginTick(float dt)
@@ -141,6 +161,30 @@ glm::vec3 TankEntity::interpolatedForwardXZ(float alpha) const
     return glm::vec3{-std::sin(yaw), 0.0f, -std::cos(yaw)};
 }
 
+void TankEntity::resetHullToAim(const glm::vec3& aimForwardXZ)
+{
+    if (!alive())
+        return;
+
+    glm::vec3 flatAim{aimForwardXZ.x, 0.0f, aimForwardXZ.z};
+    const float len = glm::length(flatAim);
+    const float desiredYaw = (len > 1e-4f)
+        ? std::atan2(-flatAim.x / len, -flatAim.z / len)
+        : curr_.bodyYaw;
+
+    curr_.angularVel = glm::vec3{0.0f};
+    recoilSlideVelXZ_ = glm::vec3{0.0f};
+    groundRollActive_ = false;
+    recoilSettleActive_ = false;
+
+    hullAlignActive_ = true;
+    hullAlignElapsed_ = 0.0f;
+    hullAlignStartYaw_ = curr_.bodyYaw;
+    hullAlignTargetYaw_ = wrapAnglePi(desiredYaw);
+    hullAlignStartRot_ = curr_.bodyRot;
+    driveBasisYaw_ = hullAlignTargetYaw_;
+}
+
 void TankEntity::triggerExplosionJump(const glm::vec3& horizontalDirXZ)
 {
     if (!alive())
@@ -153,12 +197,12 @@ void TankEntity::triggerExplosionJump(const glm::vec3& horizontalDirXZ)
     else
         baseDir = glm::vec3{-std::sin(curr_.bodyYaw), 0.0f, -std::cos(curr_.bodyYaw)};
 
-    std::uniform_real_distribution<float> angleJitterDist(-0.95f, 0.95f);
-    std::uniform_real_distribution<float> horizSpeedDist(4.5f, 10.5f);
-    std::uniform_real_distribution<float> upSpeedDist(13.5f, 18.5f);
-    std::uniform_real_distribution<float> pitchSpinDist(5.5f, 11.5f);
-    std::uniform_real_distribution<float> yawSpinDist(-7.5f, 7.5f);
-    std::uniform_real_distribution<float> rollSpinDist(5.0f, 10.5f);
+    std::uniform_real_distribution<float> angleJitterDist(-0.90f, 0.90f);
+    std::uniform_real_distribution<float> horizSpeedDist(4.5f, 9.5f);
+    std::uniform_real_distribution<float> upSpeedDist(11.5f, 14.5f);
+    std::uniform_real_distribution<float> pitchSpinDist(5.0f, 10.0f);
+    std::uniform_real_distribution<float> yawSpinDist(-6.5f, 6.5f);
+    std::uniform_real_distribution<float> rollSpinDist(4.5f, 9.5f);
     std::uniform_int_distribution<int> signDist(0, 1);
 
     const float jitter = angleJitterDist(rng_);
@@ -172,7 +216,6 @@ void TankEntity::triggerExplosionJump(const glm::vec3& horizontalDirXZ)
     const float pitchSign = signDist(rng_) == 0 ? 1.0f : -1.0f;
     const float rollSign = signDist(rng_) == 0 ? 1.0f : -1.0f;
 
-    // TABS-style chaotic, exaggerated explosion launch and multi-axis tumble.
     curr_.velocity = launchDir * horizSpeedDist(rng_) + glm::vec3{0.0f, upSpeedDist(rng_), 0.0f};
     curr_.angularVel = glm::vec3{
         pitchSign * pitchSpinDist(rng_),
@@ -180,6 +223,10 @@ void TankEntity::triggerExplosionJump(const glm::vec3& horizontalDirXZ)
         rollSign * rollSpinDist(rng_)};
     curr_.airborne = true;
     curr_.onRamp = false;
+    groundRollActive_ = false;
+    recoilSettleActive_ = false;
+    hullAlignActive_ = false;
+    airRecoilCount_ = 0;
     tookOffThisTick_ = true;
 }
 
@@ -192,39 +239,76 @@ void TankEntity::applyFireRecoil(const glm::vec3& fireForward)
     const float len = glm::length(recoilDir);
     recoilDir = (len > 1e-4f) ? (recoilDir / len) : glm::vec3{0.0f, 0.0f, 1.0f};
 
-    std::uniform_real_distribution<float> kickJitterDist(0.85f, 1.25f);
-    std::uniform_real_distribution<float> wobbleDist(-2.4f, 2.4f);
+    std::uniform_real_distribution<float> kickJitterDist(0.90f, 1.18f);
+    std::uniform_real_distribution<float> wobbleDist(-1.8f, 1.8f);
     const float mult = kickJitterDist(rng_);
 
     const glm::vec3 recoilHoriz{recoilDir.x, 0.0f, recoilDir.z};
     const float horizLen = glm::length(recoilHoriz);
     const glm::vec3 recoilXZ = (horizLen > 1e-4f) ? (recoilHoriz / horizLen) : glm::vec3{0.0f, 0.0f, 1.0f};
 
-    // World torque axis that pitches the nose upward / rocks the hull opposite to fire direction.
     const glm::vec3 worldTorqueAxis = glm::cross(glm::vec3{0.0f, 1.0f, 0.0f}, recoilXZ);
     const glm::vec3 localTorqueAxis = glm::inverse(curr_.bodyRot) * worldTorqueAxis;
 
     if (curr_.airborne)
     {
-        // Mid-air TABS trickshot cannon recoil: strong backward blast + comedic tumble spin.
-        curr_.velocity += recoilDir * (9.5f * mult) + glm::vec3{0.0f, 3.2f * mult, 0.0f};
-        curr_.angularVel += localTorqueAxis * (7.5f * mult) +
-                            glm::vec3{wobbleDist(rng_), wobbleDist(rng_) * 1.4f, wobbleDist(rng_)};
+        // Airborne recoil diminishes exponentially on repeated mid-air shots so the tank cannot fly forever.
+        const float decay = std::pow(0.55f, static_cast<float>(airRecoilCount_));
+        ++airRecoilCount_;
+
+        const float upAllowance = (curr_.bodyPos.y < 5.5f) ? (2.6f * decay * mult) : 0.0f;
+        curr_.velocity += recoilXZ * (10.5f * decay * mult) + glm::vec3{0.0f, upAllowance, 0.0f};
+        curr_.velocity.y = std::min(curr_.velocity.y, 12.0f);
+        curr_.angularVel += localTorqueAxis * (7.5f * decay * mult) +
+                            glm::vec3{wobbleDist(rng_), wobbleDist(rng_), wobbleDist(rng_)} * decay;
+        recoilSettleActive_ = false;
+        hullAlignActive_ = false;
     }
     else
     {
-        // Grounded TABS comic recoil: exaggerated backward kick + hop + nose-up rock.
-        curr_.velocity = recoilXZ * (7.2f * mult) + glm::vec3{0.0f, 3.8f * mult, 0.0f};
-        curr_.angularVel = localTorqueAxis * (5.2f * mult) +
-                           glm::vec3{wobbleDist(rng_) * 0.45f, wobbleDist(rng_) * 0.6f, wobbleDist(rng_) * 0.7f};
-        curr_.airborne = true;
-        curr_.onRamp = false;
+        // Subtle grounded recoil: gentle backward nudge + brief rock/roll without launching into air.
+        recoilSlideVelXZ_ += recoilXZ * (4.2f * mult);
+        curr_.angularVel += localTorqueAxis * (3.6f * mult) +
+                            glm::vec3{wobbleDist(rng_) * 0.25f, wobbleDist(rng_) * 0.2f, wobbleDist(rng_) * 0.35f};
+        groundRollActive_ = true;
+        recoilSettleActive_ = false;
+        hullAlignActive_ = false;
     }
+}
+
+void TankEntity::applyHitImpulse(const glm::vec3& hitPoint, const glm::vec3& impulseDir)
+{
+    glm::vec3 dir = impulseDir;
+    const float len = glm::length(dir);
+    dir = (len > 1e-4f) ? (dir / len) : glm::vec3{0.0f, 0.0f, -1.0f};
+
+    std::uniform_real_distribution<float> jitterDist(0.85f, 1.25f);
+    std::uniform_real_distribution<float> spinJitter(-2.2f, 2.2f);
+    const float mult = jitterDist(rng_);
+
+    const glm::vec3 lever = hitPoint - (curr_.bodyPos + glm::vec3{0.0f, spec_.bodyHalfExtents.y, 0.0f});
+    const glm::vec3 worldTorque = glm::cross(lever, dir);
+    const glm::vec3 localTorque = glm::inverse(curr_.bodyRot) * worldTorque;
+
+    const glm::vec3 dirXZ{dir.x, 0.0f, dir.z};
+    const float xzLen = glm::length(dirXZ);
+    const glm::vec3 flatDir = (xzLen > 1e-4f) ? (dirXZ / xzLen) : glm::vec3{0.0f, 0.0f, -1.0f};
+
+    curr_.velocity += flatDir * (9.5f * mult) + glm::vec3{0.0f, 6.8f * mult, 0.0f};
+    curr_.velocity.y = std::min(curr_.velocity.y, 12.5f);
+    curr_.angularVel += localTorque * (7.5f * mult) +
+                        glm::vec3{spinJitter(rng_), spinJitter(rng_), spinJitter(rng_)};
+    curr_.airborne = true;
+    curr_.onRamp = false;
+    groundRollActive_ = false;
+    recoilSettleActive_ = false;
+    hullAlignActive_ = false;
 }
 
 void TankEntity::applyDrive(
     float moveForwardInput,
     float moveRightInput,
+    bool boostActive,
     float dt,
     const RampSurface* ramp,
     std::span<const OBB> solidObstacles,
@@ -236,17 +320,48 @@ void TankEntity::applyDrive(
     const glm::vec3 previousPos = curr_.bodyPos;
     const float previousYaw = curr_.bodyYaw;
 
-    // WASD 4-directional movement in world XZ (W: -Z, S: +Z, A: -X, D: +X).
-    glm::vec3 moveDirXZ{moveRightInput, 0.0f, -moveForwardInput};
-    const float moveInputLen = glm::length(moveDirXZ);
+    const float boostTarget = boostActive ? 1.0f : 0.0f;
+    boostBlend_ += (boostTarget - boostBlend_) * std::clamp(dt * (boostActive ? 10.0f : 7.0f), 0.0f, 1.0f);
+    const float effectiveMoveSpeed = spec_.moveSpeed * glm::mix(1.0f, spec_.boostSpeedMultiplier, boostBlend_);
+
+    // WASD uses the hull home forward basis set at spawn or when 'r' resets hull pose to aim point.
+    // Pressing W itself does NOT chase the live mouse aim point unless 'r' was pressed.
+    const glm::vec3 basisFwd{-std::sin(driveBasisYaw_), 0.0f, -std::cos(driveBasisYaw_)};
+    const glm::vec3 basisRight = glm::normalize(glm::cross(basisFwd, glm::vec3{0.0f, 1.0f, 0.0f}));
+
+    glm::vec3 moveDirXZ = basisFwd * moveForwardInput + basisRight * moveRightInput;
+    float moveInputLen = glm::length(moveDirXZ);
     if (moveInputLen > 1e-4f)
+    {
         moveDirXZ /= moveInputLen;
+    }
+    else if (boostActive)
+    {
+        moveDirXZ = glm::vec3{-std::sin(curr_.bodyYaw), 0.0f, -std::cos(curr_.bodyYaw)};
+        moveInputLen = 1.0f;
+    }
     else
+    {
         moveDirXZ = glm::vec3{0.0f};
+    }
+
+    if (hullAlignActive_ && moveInputLen > 1e-4f &&
+        (moveForwardInput <= 0.0f || std::abs(moveRightInput) > 1e-4f))
+    {
+        hullAlignActive_ = false;
+    }
 
     if (!curr_.airborne)
     {
-        if (moveInputLen > 1e-4f)
+        if (hullAlignActive_)
+        {
+            hullAlignElapsed_ += dt;
+            const float u = std::clamp(hullAlignElapsed_ / std::max(hullAlignDuration_, 1e-4f), 0.0f, 1.0f);
+            const float inv = 1.0f - u;
+            const float ease = 1.0f - inv * inv * inv;
+            curr_.bodyYaw = lerpAngle(hullAlignStartYaw_, hullAlignTargetYaw_, ease);
+        }
+        else if (moveInputLen > 1e-4f)
         {
             const float desiredYaw = std::atan2(-moveDirXZ.x, -moveDirXZ.z);
             const float yawDelta = wrapAnglePi(desiredYaw - curr_.bodyYaw);
@@ -255,8 +370,10 @@ void TankEntity::applyDrive(
         }
 
         const glm::vec3 forwardXZ{-std::sin(curr_.bodyYaw), 0.0f, -std::cos(curr_.bodyYaw)};
-        float nextX = std::clamp(curr_.bodyPos.x + moveDirXZ.x * (spec_.moveSpeed * dt), -arenaHalfExtent, arenaHalfExtent);
-        float nextZ = std::clamp(curr_.bodyPos.z + moveDirXZ.z * (spec_.moveSpeed * dt), -arenaHalfExtent, arenaHalfExtent);
+        recoilSlideVelXZ_ *= std::exp(-3.4f * dt);
+        const glm::vec3 totalGroundVelXZ = moveDirXZ * effectiveMoveSpeed + recoilSlideVelXZ_;
+        float nextX = std::clamp(curr_.bodyPos.x + totalGroundVelXZ.x * dt, -arenaHalfExtent, arenaHalfExtent);
+        float nextZ = std::clamp(curr_.bodyPos.z + totalGroundVelXZ.z * dt, -arenaHalfExtent, arenaHalfExtent);
 
         const float bodyRadius = std::min(spec_.bodyHalfExtents.x, spec_.bodyHalfExtents.z);
         resolveObstaclePenetrationXZ(nextX, nextZ, bodyRadius, solidObstacles);
@@ -264,7 +381,7 @@ void TankEntity::applyDrive(
         nextZ = std::clamp(nextZ, -arenaHalfExtent, arenaHalfExtent);
 
         const bool wasOnRamp = curr_.onRamp;
-        const float prevSurfaceY = curr_.bodyPos.y;
+        const float prevSurfaceY = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
         if (!wasOnRamp && ramp)
         {
             const float tryXSurface = ramp->heightAt(nextX, curr_.bodyPos.z);
@@ -286,33 +403,90 @@ void TankEntity::applyDrive(
         {
             const glm::vec3 horizVel = (dt > 1e-6f)
                 ? glm::vec3{(nextX - previousPos.x) / dt, 0.0f, (nextZ - previousPos.z) / dt}
-                : moveDirXZ * spec_.moveSpeed;
+                : moveDirXZ * effectiveMoveSpeed;
             const float horizSpeed = glm::length(horizVel);
-            const float launchUp = std::max(horizSpeed * std::tan(ramp->slopePitchRad()) * 1.65f, 6.4f);
+            const float launchUp = std::clamp(horizSpeed * std::tan(ramp->slopePitchRad()) * 1.55f, 6.4f, 11.5f);
 
             curr_.bodyPos = glm::vec3{nextX, prevSurfaceY + 0.02f, nextZ};
             curr_.velocity = glm::vec3{horizVel.x, launchUp, horizVel.z};
             curr_.angularVel = glm::vec3{0.8f, 0.0f, 0.0f};
             curr_.airborne = true;
             curr_.onRamp = false;
+            groundRollActive_ = false;
+            recoilSettleActive_ = false;
+            hullAlignActive_ = false;
+            airRecoilCount_ = 0;
             tookOffThisTick_ = true;
         }
         else
         {
             const bool finalOnRamp = ramp && ramp->containsXZ(nextX, nextZ);
-            const float finalY = ramp ? ramp->heightAt(nextX, nextZ) : 0.0f;
-            curr_.bodyPos = glm::vec3{nextX, finalY, nextZ};
-            curr_.onRamp = finalOnRamp;
-            curr_.velocity = (dt > 1e-6f) ? (curr_.bodyPos - previousPos) / dt : glm::vec3{0.0f};
-            curr_.angularVel = glm::vec3{0.0f};
+            const float surfaceY = ramp ? ramp->heightAt(nextX, nextZ) : 0.0f;
 
+            const float dashLean = -0.07f * boostBlend_;
             const float targetPitch = finalOnRamp
                 ? (ramp->slopePitchRad() * glm::dot(forwardXZ, glm::vec3{0.0f, 0.0f, -1.0f}))
-                : 0.0f;
-            curr_.bodyPitch += (targetPitch - curr_.bodyPitch) * std::clamp(dt * 14.0f, 0.0f, 1.0f);
-
+                : dashLean;
+            curr_.bodyPitch += (targetPitch - curr_.bodyPitch) * std::clamp(dt * 12.0f, 0.0f, 1.0f);
             const glm::quat targetRot = buildBodyRotation(curr_.bodyYaw, curr_.bodyPitch);
-            curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, targetRot, std::clamp(dt * 14.0f, 0.0f, 1.0f)));
+
+            if (hullAlignActive_)
+            {
+                const float u = std::clamp(hullAlignElapsed_ / std::max(hullAlignDuration_, 1e-4f), 0.0f, 1.0f);
+                const float inv = 1.0f - u;
+                const float ease = 1.0f - inv * inv * inv;
+                curr_.angularVel = glm::vec3{0.0f};
+                curr_.bodyRot = glm::normalize(glm::slerp(hullAlignStartRot_, targetRot, ease));
+                if (u >= 1.0f)
+                {
+                    curr_.bodyRot = targetRot;
+                    hullAlignActive_ = false;
+                }
+            }
+            else if (groundRollActive_)
+            {
+                // Roll on the floor while recoil spin decays; transition smoothly into settle once slow.
+                const float angSpeed = glm::length(curr_.angularVel);
+                if (angSpeed > 0.35f)
+                {
+                    const glm::quat stepRot = glm::angleAxis(angSpeed * dt, curr_.angularVel / angSpeed);
+                    curr_.bodyRot = glm::normalize(curr_.bodyRot * stepRot);
+                    curr_.angularVel *= std::exp(-3.6f * dt);
+                }
+                else
+                {
+                    curr_.angularVel = glm::vec3{0.0f};
+                    groundRollActive_ = false;
+                    recoilStartRot_ = curr_.bodyRot;
+                    recoilSettleElapsed_ = 0.0f;
+                    recoilSettleActive_ = true;
+                }
+            }
+            else if (recoilSettleActive_)
+            {
+                // Smooth logarithmic ease back to flat upright neutral pose with zero landing snap.
+                recoilSettleElapsed_ += dt;
+                const float u = std::clamp(recoilSettleElapsed_ / std::max(recoilSettleDuration_, 1e-4f), 0.0f, 1.0f);
+                const float smoothU = u * u * (3.0f - 2.0f * u);
+                constexpr float kLogK = 4.0f;
+                const float logAlpha = std::log1p(kLogK * smoothU) / std::log1p(kLogK);
+                curr_.bodyRot = glm::normalize(glm::slerp(recoilStartRot_, targetRot, logAlpha));
+                if (u >= 1.0f)
+                {
+                    curr_.bodyRot = targetRot;
+                    recoilSettleActive_ = false;
+                }
+            }
+            else
+            {
+                curr_.angularVel = glm::vec3{0.0f};
+                curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, targetRot, std::clamp(dt * 12.0f, 0.0f, 1.0f)));
+            }
+
+            const float rollLift = groundClearanceForTilt(curr_.bodyRot, spec_);
+            curr_.bodyPos = glm::vec3{nextX, surfaceY + rollLift, nextZ};
+            curr_.onRamp = finalOnRamp;
+            curr_.velocity = (dt > 1e-6f) ? (curr_.bodyPos - previousPos) / dt : glm::vec3{0.0f};
         }
 
         const float travel = glm::dot(curr_.bodyPos - previousPos, forwardXZ);
@@ -322,41 +496,72 @@ void TankEntity::applyDrive(
         return;
     }
 
-    // Airborne: smooth physics integration with chaotic comedic tumble + weak 4-way air drift.
-    curr_.velocity += moveDirXZ * (spec_.airControlAccel * dt);
-    curr_.velocity.y -= spec_.gravity * dt;
+    // Airborne: altitude-enhanced gravity + brisk descent so high jumps land quickly without dragging.
+    const float airAccel = spec_.airControlAccel * glm::mix(1.0f, 1.45f, boostBlend_);
+    curr_.velocity += moveDirXZ * (airAccel * dt);
+
+    const float surfaceNow = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
+    const float altitude = std::max(0.0f, curr_.bodyPos.y - surfaceNow);
+    float effectiveGravity = spec_.gravity;
+    if (altitude > 4.5f)
+        effectiveGravity += (altitude - 4.5f) * 4.2f;
+    if (curr_.velocity.y < 0.0f)
+        effectiveGravity *= 1.35f;
+
+    curr_.velocity.y -= effectiveGravity * dt;
+    curr_.velocity.y = std::min(curr_.velocity.y, 13.5f);
 
     curr_.bodyPos += curr_.velocity * dt;
     curr_.bodyPos.x = std::clamp(curr_.bodyPos.x, -arenaHalfExtent, arenaHalfExtent);
     curr_.bodyPos.z = std::clamp(curr_.bodyPos.z, -arenaHalfExtent, arenaHalfExtent);
 
-    const float angSpeed = glm::length(curr_.angularVel);
-    if (angSpeed > 1e-4f)
+    if (hullAlignActive_)
     {
-        const glm::quat stepRot = glm::angleAxis(angSpeed * dt, curr_.angularVel / angSpeed);
-        curr_.bodyRot = glm::normalize(curr_.bodyRot * stepRot);
-        curr_.angularVel *= std::exp(-0.55f * dt);
+        hullAlignElapsed_ += dt;
+        const float u = std::clamp(hullAlignElapsed_ / std::max(hullAlignDuration_, 1e-4f), 0.0f, 1.0f);
+        const float inv = 1.0f - u;
+        const float ease = 1.0f - inv * inv * inv;
+        curr_.angularVel = glm::vec3{0.0f};
+        curr_.bodyYaw = lerpAngle(hullAlignStartYaw_, hullAlignTargetYaw_, ease);
+        const glm::quat airTargetRot = buildBodyRotation(curr_.bodyYaw, 0.0f);
+        curr_.bodyRot = glm::normalize(glm::slerp(hullAlignStartRot_, airTargetRot, ease));
+        if (u >= 1.0f)
+        {
+            curr_.bodyRot = airTargetRot;
+            hullAlignActive_ = false;
+        }
+    }
+    else
+    {
+        const float angSpeed = glm::length(curr_.angularVel);
+        if (angSpeed > 1e-4f)
+        {
+            const glm::quat stepRot = glm::angleAxis(angSpeed * dt, curr_.angularVel / angSpeed);
+            curr_.bodyRot = glm::normalize(curr_.bodyRot * stepRot);
+            curr_.angularVel *= std::exp(-0.85f * dt);
+        }
     }
 
     const float surfaceBelow = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
     const float heightNow = std::max(0.0f, curr_.bodyPos.y - surfaceBelow);
 
-    // Smoothly align tank bottom face downward during descent so tracks land flat on the floor.
-    if (curr_.velocity.y < 0.0f && heightNow < 5.5f)
+    // Smoothly align tank bottom face downward during descent so tracks touch down smoothly.
+    if (curr_.velocity.y < 0.0f && heightNow < 5.0f)
     {
         const glm::vec3 currFwd = curr_.bodyRot * glm::vec3{0.0f, 0.0f, -1.0f};
         if (currFwd.x * currFwd.x + currFwd.z * currFwd.z > 0.04f)
             curr_.bodyYaw = std::atan2(-currFwd.x, -currFwd.z);
 
-        const float proximity = 1.0f - std::clamp(heightNow / 5.5f, 0.0f, 1.0f);
-        curr_.angularVel *= std::exp(-(4.5f + proximity * 8.0f) * dt);
+        const float proximity = 1.0f - std::clamp(heightNow / 5.0f, 0.0f, 1.0f);
+        curr_.angularVel *= std::exp(-(4.5f + proximity * 7.5f) * dt);
 
         const glm::quat uprightRot = buildBodyRotation(curr_.bodyYaw, 0.0f);
-        const float alignRate = 4.0f + proximity * 14.0f;
+        const float alignRate = 3.5f + proximity * 10.0f;
         curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, uprightRot, std::clamp(dt * alignRate, 0.0f, 1.0f)));
     }
 
-    if (curr_.bodyPos.y <= surfaceBelow && curr_.velocity.y <= 0.0f)
+    const float landingY = surfaceBelow + groundClearanceForTilt(curr_.bodyRot, spec_);
+    if (curr_.bodyPos.y <= landingY && curr_.velocity.y <= 0.0f)
     {
         const float bodyRadius = std::min(spec_.bodyHalfExtents.x, spec_.bodyHalfExtents.z);
         resolveObstaclePenetrationXZ(curr_.bodyPos.x, curr_.bodyPos.z, bodyRadius, solidObstacles);
@@ -364,14 +569,19 @@ void TankEntity::applyDrive(
         curr_.bodyPos.z = std::clamp(curr_.bodyPos.z, -arenaHalfExtent, arenaHalfExtent);
 
         const float resolvedSurface = ramp ? ramp->heightAt(curr_.bodyPos.x, curr_.bodyPos.z) : 0.0f;
-        curr_.bodyPos.y = resolvedSurface;
+        curr_.bodyPos.y = resolvedSurface + groundClearanceForTilt(curr_.bodyRot, spec_);
+        recoilSlideVelXZ_ = glm::vec3{curr_.velocity.x * 0.35f, 0.0f, curr_.velocity.z * 0.35f};
         curr_.velocity = glm::vec3{0.0f};
         curr_.angularVel = glm::vec3{0.0f};
         curr_.airborne = false;
+        airRecoilCount_ = 0;
         curr_.onRamp = ramp && ramp->containsXZ(curr_.bodyPos.x, curr_.bodyPos.z) && resolvedSurface > 0.01f;
         curr_.bodyPitch = 0.0f;
-        const glm::quat uprightRot = buildBodyRotation(curr_.bodyYaw, 0.0f);
-        curr_.bodyRot = glm::normalize(glm::slerp(curr_.bodyRot, uprightRot, 0.45f));
+
+        // Continuous, zero-snap smooth settle from landing orientation to flat neutral pose.
+        recoilStartRot_ = curr_.bodyRot;
+        recoilSettleElapsed_ = 0.0f;
+        recoilSettleActive_ = true;
     }
 }
 

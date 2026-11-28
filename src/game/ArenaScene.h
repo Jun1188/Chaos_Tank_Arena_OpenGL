@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <vector>
 
 namespace game
@@ -27,12 +28,32 @@ struct EnemyEntity
     TankEntity tank{};
 };
 
+struct PropBody
+{
+    EntityId id{kInvalidEntityId};
+    glm::vec3 prevPos{0.0f};
+    glm::vec3 pos{0.0f};
+    glm::quat prevRot{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::quat rot{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec3 velocity{0.0f};
+    glm::vec3 angularVel{0.0f};
+    glm::vec3 halfExtents{1.0f};
+
+    OBB toOBB(float alpha = 1.0f) const;
+    void reset(EntityId propId, const glm::vec3& center, const glm::vec3& extents);
+    void applyHitImpulse(const glm::vec3& hitPoint, const glm::vec3& impulseDir);
+    void step(float dt, float arenaHalfExtent = 23.0f);
+};
+
 struct PreviewBoxItem
 {
     glm::mat4 worldMatrix{1.0f};
     glm::vec3 color{1.0f};
     bool wireframe{false};
     bool tankFallback{false};
+    bool keepOpaqueInZoom{false};
+    glm::vec3 worldCenter{0.0f};
+    float boundingRadius{0.5f};
 };
 
 struct PreviewLineItem
@@ -46,6 +67,10 @@ struct PreviewTankItem
 {
     TankPose pose{};
     glm::vec3 tint{1.0f};
+    bool isPlayer{false};
+    bool isZoomTarget{false};
+    glm::vec3 worldCenter{0.0f};
+    float boundingRadius{1.8f};
 };
 
 struct PreviewFrame
@@ -62,8 +87,18 @@ struct PreviewFrame
     std::uint32_t totalTargetHits{0};
     std::size_t activeProjectiles{0};
     bool debugOverlay{true};
+    float zoomAlphaFade{0.0f};
+    glm::vec3 zoomTargetPos{0.0f, 1.0f, -10.0f};
     CameraRequest cameraRequest{};
     TrickshotHudState trickshot{};
+};
+
+struct AimCameraContext
+{
+    glm::vec3 playerPos{0.0f};
+    glm::vec3 aimPoint{0.0f, 0.9f, -10.0f};
+    bool airborne{false};
+    float heightAboveGround{0.0f};
 };
 
 class ArenaScene
@@ -74,6 +109,8 @@ public:
         float rawDt,
         float renderAlpha,
         const glm::vec2& rawMouseDelta,
+        bool rmbHeld,
+        bool lmbHeld,
         const glm::vec3& mainCamPos,
         const glm::vec3& mainCamLookAt,
         float mainCamFovDeg);
@@ -83,6 +120,7 @@ public:
     const TankEntity& player() const { return player_; }
     glm::vec3 playerInterpolatedPosition(float alpha) const { return player_.interpolatedPosition(alpha); }
     glm::vec3 playerInterpolatedForwardXZ(float alpha) const { return player_.interpolatedForwardXZ(alpha); }
+    AimCameraContext cameraAimContext(float alpha) const;
     const std::vector<EnemyEntity>& enemies() const { return enemies_; }
     const std::vector<Projectile>& projectiles() const { return projectiles_; }
     const std::vector<HitRecord>& frameHits() const { return frameHits_; }
@@ -98,13 +136,14 @@ private:
     const EnemyEntity* findAliveEnemy(EntityId id) const;
     std::vector<TraceCollider> gatherColliders(bool interpolated, float alpha) const;
     glm::vec3 computeMouseAimPoint(const glm::vec2& cursorPos, const PresentedView& view) const;
+    void firePlayerCannon(bool ignoreCooldown);
     void stepProjectiles(float dt);
 
     OBB floorBox_{};
     RampSurface ramp_{};
     OBB rampDeckBox_{};
     OBB rampSupportBox_{};
-    OBB barricadeBox_{};
+    PropBody barricade_{};
 
     TankEntity player_{};
     std::vector<EnemyEntity> enemies_{};
@@ -121,6 +160,7 @@ private:
     };
 
     std::vector<ExplosionBurst> explosionBursts_{};
+    glm::vec3 camAimOffset_{0.0f, 0.9f, -20.0f};
     EntityId nextEntityId_{1};
     std::uint32_t totalTargetHits_{0};
     bool debugOverlay_{true};

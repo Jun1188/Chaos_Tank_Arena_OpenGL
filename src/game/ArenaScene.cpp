@@ -21,6 +21,8 @@ std::string_view partName(PartKind part)
     {
     case PartKind::Terrain:
         return "Terrain";
+    case PartKind::Prop:
+        return "Prop";
     case PartKind::Body:
         return "Body";
     case PartKind::Turret:
@@ -76,20 +78,23 @@ void appendTankPreview(
     const glm::vec3& baseColor,
     bool drawDebug,
     bool drawAimRay,
+    bool isPlayer,
+    bool isZoomTarget,
     bool selectedHighlight,
     const glm::vec3& materialTint)
 {
-    // Keep boxing as a fallback when the GLB cannot be loaded.
-    frame.tanks.push_back({pose, materialTint});
-    frame.boxes.push_back({pose.bodyDraw, baseColor, false, true});
-    frame.boxes.push_back({pose.turretDraw, baseColor * 1.18f, false, true});
-    frame.boxes.push_back({pose.barrelDraw, baseColor * 0.82f, false, true});
+    const float tankRadius = glm::length(pose.bodyOBB.halfExtents);
+    frame.tanks.push_back({pose, materialTint, isPlayer, isZoomTarget, pose.bodyOBB.center, tankRadius});
+
+    frame.boxes.push_back({pose.bodyDraw, baseColor, false, true, isZoomTarget, pose.bodyOBB.center, glm::length(pose.bodyOBB.halfExtents)});
+    frame.boxes.push_back({pose.turretDraw, baseColor * 1.18f, false, true, isZoomTarget, pose.turretOBB.center, glm::length(pose.turretOBB.halfExtents)});
+    frame.boxes.push_back({pose.barrelDraw, baseColor * 0.82f, false, true, isPlayer || isZoomTarget, pose.barrelOBB.center, glm::length(pose.barrelOBB.halfExtents)});
 
     if (selectedHighlight)
     {
         const glm::vec3 focusColor{0.18f, 0.95f, 1.0f};
-        frame.boxes.push_back({pose.bodyDraw, focusColor, true});
-        frame.boxes.push_back({pose.turretDraw, focusColor, true});
+        frame.boxes.push_back({pose.bodyDraw, focusColor, true, false, true, pose.bodyOBB.center, tankRadius});
+        frame.boxes.push_back({pose.turretDraw, focusColor, true, false, true, pose.turretOBB.center, glm::length(pose.turretOBB.halfExtents)});
         const glm::vec3 top = pose.turretOBB.center + glm::vec3{0.0f, 0.55f, 0.0f};
         frame.lines.push_back({top, top + glm::vec3{0.0f, 2.2f, 0.0f}, focusColor});
         frame.lines.push_back({top + glm::vec3{-0.45f, 1.8f, 0.0f}, top + glm::vec3{0.45f, 1.8f, 0.0f}, focusColor});
@@ -102,9 +107,9 @@ void appendTankPreview(
     if (!selectedHighlight)
     {
         const glm::vec3 obbWireColor{0.95f, 0.90f, 0.25f};
-        frame.boxes.push_back({pose.bodyDraw, obbWireColor, true});
-        frame.boxes.push_back({pose.turretDraw, obbWireColor, true});
-        frame.boxes.push_back({pose.barrelDraw, obbWireColor, true});
+        frame.boxes.push_back({pose.bodyDraw, obbWireColor, true, false, isZoomTarget, pose.bodyOBB.center, tankRadius});
+        frame.boxes.push_back({pose.turretDraw, obbWireColor, true, false, isZoomTarget, pose.turretOBB.center, glm::length(pose.turretOBB.halfExtents)});
+        frame.boxes.push_back({pose.barrelDraw, obbWireColor, true, false, isPlayer || isZoomTarget, pose.barrelOBB.center, glm::length(pose.barrelOBB.halfExtents)});
     }
 
     appendAxesLines(frame.lines, pose.bodyOBB.center, pose.bodyOBB.axes, 1.8f);
@@ -127,6 +132,90 @@ void appendTankPreview(
 }
 } // namespace
 
+OBB PropBody::toOBB(float alpha) const
+{
+    const float t = std::clamp(alpha, 0.0f, 1.0f);
+    OBB obb{};
+    obb.center = glm::mix(prevPos, pos, t);
+    obb.axes = glm::mat3_cast(glm::normalize(glm::slerp(prevRot, rot, t)));
+    obb.halfExtents = halfExtents;
+    return obb;
+}
+
+void PropBody::reset(EntityId propId, const glm::vec3& center, const glm::vec3& extents)
+{
+    id = propId;
+    pos = center;
+    prevPos = center;
+    rot = glm::quat{1.0f, 0.0f, 0.0f, 0.0f};
+    prevRot = rot;
+    velocity = glm::vec3{0.0f};
+    angularVel = glm::vec3{0.0f};
+    halfExtents = extents;
+}
+
+void PropBody::applyHitImpulse(const glm::vec3& hitPoint, const glm::vec3& impulseDir)
+{
+    glm::vec3 dir = impulseDir;
+    const float len = glm::length(dir);
+    dir = (len > 1e-4f) ? (dir / len) : glm::vec3{0.0f, 0.0f, -1.0f};
+
+    const glm::vec3 lever = hitPoint - pos;
+    const glm::vec3 worldTorque = glm::cross(lever, dir);
+    const glm::vec3 localTorque = glm::inverse(rot) * worldTorque;
+
+    velocity += glm::vec3{dir.x, 0.0f, dir.z} * 11.0f + glm::vec3{0.0f, 6.2f, 0.0f};
+    angularVel += localTorque * 9.5f + glm::vec3{2.5f, 1.8f, -2.2f};
+}
+
+void PropBody::step(float dt, float arenaHalfExtent)
+{
+    prevPos = pos;
+    prevRot = rot;
+
+    const float speedSq = glm::dot(velocity, velocity);
+    const float angSpeed = glm::length(angularVel);
+    if (speedSq < 1e-5f && angSpeed < 1e-4f && pos.y <= halfExtents.y + 0.01f)
+        return;
+
+    velocity.y -= 16.0f * dt;
+    pos += velocity * dt;
+    pos.x = std::clamp(pos.x, -arenaHalfExtent, arenaHalfExtent);
+    pos.z = std::clamp(pos.z, -arenaHalfExtent, arenaHalfExtent);
+
+    if (angSpeed > 1e-4f)
+    {
+        const glm::quat stepRot = glm::angleAxis(angSpeed * dt, angularVel / angSpeed);
+        rot = glm::normalize(rot * stepRot);
+        angularVel *= std::exp(-1.4f * dt);
+    }
+
+    const glm::mat3 axes = glm::mat3_cast(rot);
+    const float supportHeight =
+        std::abs(axes[0].y) * halfExtents.x +
+        std::abs(axes[1].y) * halfExtents.y +
+        std::abs(axes[2].y) * halfExtents.z;
+
+    if (pos.y <= supportHeight)
+    {
+        pos.y = supportHeight;
+        if (velocity.y < -2.2f)
+        {
+            velocity.y = -velocity.y * 0.35f;
+            velocity.x *= 0.72f;
+            velocity.z *= 0.72f;
+            angularVel *= 0.75f;
+        }
+        else
+        {
+            velocity.y = 0.0f;
+            velocity.x *= std::exp(-5.0f * dt);
+            velocity.z *= std::exp(-5.0f * dt);
+            angularVel *= std::exp(-5.5f * dt);
+        }
+    }
+}
+
 void ArenaScene::reset()
 {
     floorBox_ = OBB{};
@@ -134,7 +223,6 @@ void ArenaScene::reset()
     floorBox_.axes = glm::mat3{1.0f};
     floorBox_.halfExtents = glm::vec3{kFloorHalfWidth, kFloorHalfThickness, kFloorHalfWidth};
 
-    // Jump ramp aligned toward -Z on the right lane.
     ramp_ = RampSurface{};
     {
         const float run = ramp_.startZ - ramp_.endZ;
@@ -158,12 +246,6 @@ void ArenaScene::reset()
         rampSupportBox_.halfExtents = glm::vec3{(ramp_.maxX - ramp_.minX) * 0.48f, rise * 0.42f, 0.85f};
     }
 
-    // Opaque barricade partially occluding the enemy from spawn for QA-08 focus testing.
-    barricadeBox_ = OBB{};
-    barricadeBox_.center = glm::vec3{-1.25f, 0.95f, -6.2f};
-    barricadeBox_.axes = glm::mat3{1.0f};
-    barricadeBox_.halfExtents = glm::vec3{1.25f, 0.95f, 0.35f};
-
     nextEntityId_ = 1;
     const EntityId playerId = nextEntityId_++;
     const TankSpec tankSpec = makeSandTankSpec();
@@ -175,10 +257,16 @@ void ArenaScene::reset()
     target.tank.reset(target.id, glm::vec3{0.0f, 0.0f, -10.0f}, glm::pi<float>(), tankSpec);
     enemies_.push_back(target);
 
+    // Dynamic barricade prop in front of enemy left side (supports QA-08 occlusion + comic hit physics).
+    const EntityId barricadeId = nextEntityId_++;
+    barricade_.reset(barricadeId, glm::vec3{-1.25f, 0.95f, -6.2f}, glm::vec3{1.25f, 0.95f, 0.35f});
+
     projectiles_.clear();
     frameHits_.clear();
     explosionBursts_.clear();
     trickshot_.reset();
+    camAimOffset_ = enemies_.front().tank.position() + glm::vec3{0.0f, 0.9f, 0.0f} - player_.position();
+    player_.aimAt(player_.position() + camAimOffset_, true);
     totalTargetHits_ = 0;
     displayedColliders_ = gatherColliders(false, 0.0f);
 
@@ -196,6 +284,8 @@ void ArenaScene::updateRealTime(
     float rawDt,
     float renderAlpha,
     const glm::vec2& rawMouseDelta,
+    bool rmbHeld,
+    bool lmbHeld,
     const glm::vec3& mainCamPos,
     const glm::vec3& mainCamLookAt,
     float mainCamFovDeg)
@@ -209,24 +299,110 @@ void ArenaScene::updateRealTime(
     const bool targetAlive = (selected != nullptr);
     const glm::vec3 playerRenderPos = player_.interpolatedPosition(renderAlpha);
     const glm::vec3 targetRenderPos = targetAlive ? selected->tank.interpolatedPosition(renderAlpha) : glm::vec3{0.0f};
+    const TankPose playerPose = player_.evaluatePose(renderAlpha);
 
     trickshot_.update(
         clampedDt,
         rawMouseDelta,
+        rmbHeld,
+        lmbHeld,
         player_.isAirborne(),
         targetAlive,
         mainCamPos,
         mainCamLookAt,
         mainCamFovDeg,
         playerRenderPos,
+        playerPose.muzzleForward,
         targetRenderPos);
 
-    // Keep barrel aim synchronized with the stabilized back-view camera at full render framerate.
-    if (trickshot_.isInFocusControl() && targetAlive)
+    if (trickshot_.isZoomActive())
     {
-        const glm::vec3 aimOrigin = playerRenderPos + glm::vec3{0.0f, 1.45f, 0.0f};
+        const glm::vec3 aimOrigin = playerRenderPos + glm::vec3{0.0f, 1.35f, 0.0f};
         const glm::vec3 targetCenter = targetRenderPos + glm::vec3{0.0f, 0.9f, 0.0f};
-        player_.aimAt(trickshot_.computeAimWorldTarget(aimOrigin, targetCenter), true);
+        const glm::vec3 zoomedAim = trickshot_.computeAimWorldTarget(aimOrigin, targetAlive, targetCenter);
+        player_.aimAt(zoomedAim, true);
+        camAimOffset_ = zoomedAim - playerRenderPos;
+    }
+}
+
+AimCameraContext ArenaScene::cameraAimContext(float alpha) const
+{
+    AimCameraContext ctx{};
+    ctx.playerPos = player_.interpolatedPosition(alpha);
+    ctx.airborne = player_.isAirborne();
+    const float surfaceY = ramp_.heightAt(ctx.playerPos.x, ctx.playerPos.z);
+    ctx.heightAboveGround = std::max(0.0f, ctx.playerPos.y - surfaceY);
+
+    glm::vec3 clampedOffset = camAimOffset_;
+    const glm::vec2 offsetXZ{clampedOffset.x, clampedOffset.z};
+    const float lenXZ = glm::length(offsetXZ);
+    if (lenXZ > 1e-4f)
+    {
+        const float targetLen = std::clamp(lenXZ, 6.0f, 22.0f);
+        clampedOffset.x = (offsetXZ.x / lenXZ) * targetLen;
+        clampedOffset.z = (offsetXZ.y / lenXZ) * targetLen;
+    }
+    else
+    {
+        clampedOffset = glm::vec3{0.0f, 0.9f, -16.0f};
+    }
+    clampedOffset.y = std::clamp(clampedOffset.y, -2.5f, 4.5f);
+    const glm::vec3 freeAimPoint = ctx.playerPos + clampedOffset;
+
+    if (const EnemyEntity* selected = findAliveEnemy(trickshot_.selectedTargetId()))
+    {
+        const glm::vec3 targetCenter = selected->tank.interpolatedPosition(alpha) + glm::vec3{0.0f, 0.9f, 0.0f};
+        ctx.aimPoint = glm::mix(freeAimPoint, targetCenter, 0.72f);
+        return ctx;
+    }
+
+    const glm::vec2 aimDirXZ = glm::normalize(glm::vec2{clampedOffset.x, clampedOffset.z});
+    float bestAssistWeight = 0.0f;
+    glm::vec3 bestEnemyCenter{0.0f};
+    for (const EnemyEntity& enemy : enemies_)
+    {
+        if (!enemy.tank.alive())
+            continue;
+        const glm::vec3 center = enemy.tank.interpolatedPosition(alpha) + glm::vec3{0.0f, 0.9f, 0.0f};
+        const glm::vec2 toEnemyXZ{center.x - ctx.playerPos.x, center.z - ctx.playerPos.z};
+        const float distXZ = glm::length(toEnemyXZ);
+        if (distXZ < 2.5f)
+            continue;
+        const float alignment = glm::dot(aimDirXZ, toEnemyXZ / distXZ);
+        if (alignment > 0.62f)
+        {
+            const float w = ((alignment - 0.62f) / 0.38f) * 0.36f;
+            if (w > bestAssistWeight)
+            {
+                bestAssistWeight = w;
+                bestEnemyCenter = center;
+            }
+        }
+    }
+
+    ctx.aimPoint = (bestAssistWeight > 0.0f)
+        ? glm::mix(freeAimPoint, bestEnemyCenter, bestAssistWeight)
+        : freeAimPoint;
+    return ctx;
+}
+
+void ArenaScene::firePlayerCannon(bool ignoreCooldown)
+{
+    Projectile spawned{};
+    if (player_.tryFire(spawned, ignoreCooldown))
+    {
+        projectiles_.push_back(spawned);
+        player_.applyFireRecoil(spawned.velocity);
+        explosionBursts_.push_back({spawned.pos, 0.0f, 0.18f});
+        std::println(
+            "[CP02] Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
+            spawned.ownerId,
+            spawned.pos.x,
+            spawned.pos.y,
+            spawned.pos.z,
+            spawned.velocity.x,
+            spawned.velocity.y,
+            spawned.velocity.z);
     }
 }
 
@@ -250,133 +426,146 @@ bool ArenaScene::fixedUpdate(float dt, const TickCommand& cmd, const PresentedVi
         }
     }
 
+    // RMB press: pick target and immediately enter zoom + slow (works on both ground and airborne).
     if (cmd.selectTargetRequested)
+    {
         trickshot_.selectTarget(cmd.selectCursorPos, view, displayedColliders_, player_.id());
+        const TankPose p = player_.evaluatePose();
+        trickshot_.beginZoom(ZoomTriggerSource::RightMouse, p.muzzleForward);
+    }
+
+    if (cmd.rmbReleased && trickshot_.isRightMouseZoom())
+        trickshot_.endZoom("RMB Released", player_.isAirborne());
 
     player_.beginTick(dt);
     for (EnemyEntity& enemy : enemies_)
         enemy.tank.beginTick(dt);
 
     const EnemyEntity* selectedTarget = findAliveEnemy(trickshot_.selectedTargetId());
-    if (cmd.explosionToggleRequested)
+
+    // Resolve current world aim point & horizontal aim forward BEFORE hull alignment (r) and driving (WASD).
+    const bool manualAimThisTick =
+        !trickshot_.isZoomActive() && (cmd.manualTurretTurn != 0.0f || cmd.manualBarrelPitch != 0.0f);
+    glm::vec3 activeAimPoint = player_.position() + camAimOffset_;
+    if (trickshot_.isZoomActive())
     {
-        if (trickshot_.isInFocusControl())
-        {
-            trickshot_.cancelImmediate("B Toggle Off");
-        }
-        else
-        {
-            // Guarantee target lock for B explosion trickshot if any enemy is alive.
-            if (selectedTarget == nullptr)
-            {
-                float bestDistSq = std::numeric_limits<float>::infinity();
-                for (const EnemyEntity& enemy : enemies_)
-                {
-                    if (!enemy.tank.alive())
-                        continue;
-                    const glm::vec3 diff = enemy.tank.position() - player_.position();
-                    const float distSq = diff.x * diff.x + diff.z * diff.z;
-                    if (distSq < bestDistSq)
-                    {
-                        bestDistSq = distSq;
-                        selectedTarget = &enemy;
-                    }
-                }
-                if (selectedTarget != nullptr)
-                {
-                    trickshot_.setSelectedTargetForTest(selectedTarget->id);
-                    std::println("[CP02] Auto-Focus on B | Target ID={}", selectedTarget->id);
-                }
-            }
-
-            glm::vec3 jumpDir{cmd.moveRight, 0.0f, -cmd.moveForward};
-            if (glm::dot(jumpDir, jumpDir) < 1e-4f && selectedTarget != nullptr)
-                jumpDir = selectedTarget->tank.position() - player_.position();
-            explosionBursts_.push_back({player_.position(), 0.0f, 0.45f});
-            player_.triggerExplosionJump(jumpDir);
-            trickshot_.onTakeoff();
-            if (selectedTarget != nullptr)
-                trickshot_.enterImmediate(true);
-            else
-                std::println("[CP02] Explosion Jump (B) | No alive enemy remaining");
-        }
+        const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.35f, 0.0f};
+        const bool targetAlive = (selectedTarget != nullptr);
+        const glm::vec3 targetCenter = targetAlive ? (selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f}) : glm::vec3{0.0f};
+        activeAimPoint = trickshot_.computeAimWorldTarget(aimOrigin, targetAlive, targetCenter);
+        camAimOffset_ = activeAimPoint - player_.position();
     }
-
-    const OBB solidObstacles[1]{barricadeBox_};
-    player_.applyDrive(cmd.moveForward, cmd.moveRight, dt, &ramp_, solidObstacles, kFloorHalfWidth - 2.0f);
-
-    if (player_.tookOffThisTick() && !cmd.explosionToggleRequested)
-        trickshot_.onTakeoff();
-
-    if (player_.isAirborne() && selectedTarget != nullptr && !trickshot_.isInFocusControl())
-    {
-        trickshot_.tryEnter(
-            true,
-            player_.heightAboveGround(&ramp_),
-            true,
-            player_.position(),
-            selectedTarget->tank.position());
-    }
-
-    if (trickshot_.isInFocusControl() && selectedTarget != nullptr)
-    {
-        const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.45f, 0.0f};
-        const glm::vec3 targetCenter = selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f};
-        player_.aimAt(trickshot_.computeAimWorldTarget(aimOrigin, targetCenter), true);
-    }
-    else if (cmd.manualTurretTurn != 0.0f || cmd.manualBarrelPitch != 0.0f)
+    else if (manualAimThisTick)
     {
         player_.adjustManualAim(cmd.manualTurretTurn, cmd.manualBarrelPitch, dt);
+        const TankPose updatedPose = player_.evaluatePose();
+        activeAimPoint = updatedPose.muzzleOrigin + updatedPose.muzzleForward * 16.0f;
+        camAimOffset_ = activeAimPoint - player_.position();
     }
     else if (cmd.hasMouseAim && view.valid)
     {
-        const glm::vec3 aimPoint = computeMouseAimPoint(cmd.cursorPos, view);
-        player_.aimAt(aimPoint);
+        activeAimPoint = computeMouseAimPoint(cmd.cursorPos, view);
+        if (cmd.cursorMoved)
+            camAimOffset_ = activeAimPoint - player_.position();
     }
 
+    glm::vec3 aimForwardXZ{
+        activeAimPoint.x - player_.position().x,
+        0.0f,
+        activeAimPoint.z - player_.position().z};
+    if (glm::dot(aimForwardXZ, aimForwardXZ) < 0.16f)
+        aimForwardXZ = glm::vec3{camAimOffset_.x, 0.0f, camAimOffset_.z};
+    if (glm::dot(aimForwardXZ, aimForwardXZ) < 1e-4f)
+        aimForwardXZ = player_.interpolatedForwardXZ(1.0f);
+    else
+        aimForwardXZ = glm::normalize(aimForwardXZ);
+
+    if (cmd.alignHullRequested)
+    {
+        player_.resetHullToAim(aimForwardXZ);
+        std::println(
+            "[CP02] Hull Pose Reset (r) | AimPoint=({:.2f}, {:.2f}, {:.2f})",
+            activeAimPoint.x,
+            activeAimPoint.y,
+            activeAimPoint.z);
+    }
+
+    if (cmd.explosionToggleRequested)
+    {
+        if (player_.isAirborne())
+        {
+            trickshot_.toggleMildAirborneSlow();
+            std::println("[CP02] Airborne Mild Slow Toggle (B) | TimeScale={:.2f}x", trickshot_.timeScale());
+        }
+        else
+        {
+            const glm::vec3 aimRightXZ = glm::normalize(glm::cross(aimForwardXZ, glm::vec3{0.0f, 1.0f, 0.0f}));
+            glm::vec3 jumpDir = aimForwardXZ * cmd.moveForward + aimRightXZ * cmd.moveRight;
+            if (glm::dot(jumpDir, jumpDir) < 1e-4f)
+                jumpDir = aimForwardXZ;
+            explosionBursts_.push_back({player_.position(), 0.0f, 0.45f});
+            player_.triggerExplosionJump(jumpDir);
+            trickshot_.onTakeoff(true);
+            std::println("[CP02] Explosion Jump (B) | Airborne Mild Slow={:.2f}x", trickshot_.timeScale());
+        }
+    }
+
+    barricade_.step(dt, kFloorHalfWidth - 2.0f);
+    const OBB solidObstacles[1]{barricade_.toOBB(1.0f)};
+    player_.applyDrive(
+        cmd.moveForward,
+        cmd.moveRight,
+        cmd.boostActive,
+        dt,
+        &ramp_,
+        solidObstacles,
+        kFloorHalfWidth - 2.0f);
+
+    // Step comic hit physics for enemies as well.
+    for (EnemyEntity& enemy : enemies_)
+    {
+        enemy.tank.applyDrive(
+            0.0f,
+            0.0f,
+            false,
+            dt,
+            &ramp_,
+            solidObstacles,
+            kFloorHalfWidth - 2.0f);
+    }
+
+    if (player_.tookOffThisTick() && !cmd.explosionToggleRequested)
+        trickshot_.onTakeoff(true);
+
+    if (trickshot_.isZoomActive())
+    {
+        const glm::vec3 aimOrigin = player_.position() + glm::vec3{0.0f, 1.35f, 0.0f};
+        const bool targetAlive = (selectedTarget != nullptr);
+        const glm::vec3 targetCenter = targetAlive ? (selectedTarget->tank.position() + glm::vec3{0.0f, 0.9f, 0.0f}) : glm::vec3{0.0f};
+        const glm::vec3 zoomedAim = trickshot_.computeAimWorldTarget(aimOrigin, targetAlive, targetCenter);
+        player_.aimAt(zoomedAim, true);
+        camAimOffset_ = zoomedAim - player_.position();
+    }
+    else if (!manualAimThisTick)
+    {
+        player_.aimAt(activeAimPoint);
+    }
+
+    // LMB press while RMB-zoomed -> release zoom+slow and fire immediately!
+    // Normal LMB press -> fire immediately!
     if (cmd.fireRequested)
     {
-        if (trickshot_.isInFocusControl())
-        {
-            if (trickshot_.consumeShotOpportunity())
-            {
-                Projectile spawned{};
-                if (player_.tryFire(spawned, true))
-                {
-                    projectiles_.push_back(spawned);
-                    player_.applyFireRecoil(spawned.velocity);
-                    explosionBursts_.push_back({spawned.pos, 0.0f, 0.22f});
-                    std::println(
-                        "[CP02] Trickshot Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
-                        spawned.ownerId,
-                        spawned.pos.x,
-                        spawned.pos.y,
-                        spawned.pos.z,
-                        spawned.velocity.x,
-                        spawned.velocity.y,
-                        spawned.velocity.z);
-                }
-            }
-        }
-        else if (trickshot_.canNormalFire())
-        {
-            Projectile spawned{};
-            if (player_.tryFire(spawned))
-            {
-                projectiles_.push_back(spawned);
-                player_.applyFireRecoil(spawned.velocity);
-                explosionBursts_.push_back({spawned.pos, 0.0f, 0.18f});
-                std::println(
-                    "[CP01] Fire | Owner={} Origin=({:.2f}, {:.2f}, {:.2f}) Vel=({:.2f}, {:.2f}, {:.2f})",
-                    spawned.ownerId,
-                    spawned.pos.x,
-                    spawned.pos.y,
-                    spawned.pos.z,
-                    spawned.velocity.x,
-                    spawned.velocity.y,
-                    spawned.velocity.z);
-            }
-        }
+        const bool wasRmbZoom = trickshot_.isRightMouseZoom();
+        if (wasRmbZoom)
+            trickshot_.endZoom("LMB Fired", player_.isAirborne());
+        firePlayerCannon(wasRmbZoom);
+    }
+
+    // LMB release after >=1.2s LMB hold-zoom -> release zoom+slow and fire!
+    if (cmd.lmbReleased && trickshot_.isLeftHoldZoom())
+    {
+        trickshot_.endZoom("LMB Hold Released & Fired", player_.isAirborne());
+        firePlayerCannon(true);
     }
 
     stepProjectiles(dt);
@@ -415,7 +604,7 @@ std::vector<TraceCollider> ArenaScene::gatherColliders(bool interpolated, float 
     colliders.push_back({kInvalidEntityId, PartKind::Terrain, floorBox_});
     colliders.push_back({kInvalidEntityId, PartKind::Terrain, rampDeckBox_});
     colliders.push_back({kInvalidEntityId, PartKind::Terrain, rampSupportBox_});
-    colliders.push_back({kInvalidEntityId, PartKind::Terrain, barricadeBox_});
+    colliders.push_back({barricade_.id, PartKind::Prop, barricade_.toOBB(interpolated ? alpha : 1.0f)});
 
     if (player_.alive())
     {
@@ -496,7 +685,20 @@ void ArenaScene::stepProjectiles(float dt)
         const glm::vec3 nextPos = proj.pos + proj.velocity * stepDt;
 
         const SegmentHit contact = Physics::traceSegment(proj.pos, nextPos, colliders, proj.ownerId);
-        if (contact.hit && contact.entityId != kInvalidEntityId && contact.part != PartKind::Terrain)
+        if (contact.hit && contact.part == PartKind::Prop && contact.entityId == barricade_.id)
+        {
+            proj.pos = contact.point;
+            proj.pendingRemoval = true;
+            barricade_.applyHitImpulse(contact.point, proj.velocity);
+            explosionBursts_.push_back({contact.point, 0.0f, 0.30f});
+            std::println(
+                "[CP02] Prop Hit! Barricade(ID={}) Contact=({:.2f}, {:.2f}, {:.2f})",
+                barricade_.id,
+                contact.point.x,
+                contact.point.y,
+                contact.point.z);
+        }
+        else if (contact.hit && contact.entityId != kInvalidEntityId && contact.part != PartKind::Terrain)
         {
             proj.pos = contact.point;
             proj.pendingRemoval = true;
@@ -504,6 +706,8 @@ void ArenaScene::stepProjectiles(float dt)
             if (EnemyEntity* hitEnemy = findAliveEnemy(contact.entityId))
             {
                 hitEnemy->tank.applyDamage(proj.damage);
+                hitEnemy->tank.applyHitImpulse(contact.point, proj.velocity);
+                explosionBursts_.push_back({contact.point, 0.0f, 0.32f});
                 ++totalTargetHits_;
                 frameHits_.push_back({
                     hitEnemy->id,
@@ -548,7 +752,6 @@ void ArenaScene::stepProjectiles(float dt)
 
 PreviewFrame ArenaScene::buildFrame(float alpha)
 {
-    // Cache displayed colliders matching the rendered poses for CP02-FOCUS right-click selection.
     displayedColliders_ = gatherColliders(true, alpha);
 
     PreviewFrame frame{};
@@ -566,16 +769,19 @@ PreviewFrame ArenaScene::buildFrame(float alpha)
     frame.activeProjectiles = projectiles_.size();
     frame.cameraRequest = trickshot_.cameraRequest();
     frame.trickshot = trickshot_.hudState();
+    frame.zoomAlphaFade = trickshot_.zoomAlphaFade();
+    frame.zoomTargetPos = trickshot_.zoomFocusPoint();
 
-    frame.boxes.push_back({makeOBBDrawMatrix(floorBox_), glm::vec3{0.22f, 0.25f, 0.29f}, false});
-    frame.boxes.push_back({makeOBBDrawMatrix(rampDeckBox_), glm::vec3{0.76f, 0.56f, 0.22f}, false});
-    frame.boxes.push_back({makeOBBDrawMatrix(rampSupportBox_), glm::vec3{0.50f, 0.37f, 0.16f}, false});
-    frame.boxes.push_back({makeOBBDrawMatrix(barricadeBox_), glm::vec3{0.52f, 0.55f, 0.60f}, false});
+    const OBB barricadeOBB = barricade_.toOBB(alpha);
+    frame.boxes.push_back({makeOBBDrawMatrix(floorBox_), glm::vec3{0.22f, 0.25f, 0.29f}, false, false, true, floorBox_.center, 0.0f});
+    frame.boxes.push_back({makeOBBDrawMatrix(rampDeckBox_), glm::vec3{0.76f, 0.56f, 0.22f}, false, false, false, rampDeckBox_.center, glm::length(rampDeckBox_.halfExtents)});
+    frame.boxes.push_back({makeOBBDrawMatrix(rampSupportBox_), glm::vec3{0.50f, 0.37f, 0.16f}, false, false, false, rampSupportBox_.center, glm::length(rampSupportBox_.halfExtents)});
+    frame.boxes.push_back({makeOBBDrawMatrix(barricadeOBB), glm::vec3{0.52f, 0.55f, 0.60f}, false, false, false, barricadeOBB.center, glm::length(barricadeOBB.halfExtents)});
 
     if (debugOverlay_)
     {
-        frame.boxes.push_back({makeOBBDrawMatrix(rampDeckBox_), glm::vec3{1.0f, 0.85f, 0.35f}, true});
-        frame.boxes.push_back({makeOBBDrawMatrix(barricadeBox_), glm::vec3{0.85f, 0.88f, 0.92f}, true});
+        frame.boxes.push_back({makeOBBDrawMatrix(rampDeckBox_), glm::vec3{1.0f, 0.85f, 0.35f}, true, false, false, rampDeckBox_.center, glm::length(rampDeckBox_.halfExtents)});
+        frame.boxes.push_back({makeOBBDrawMatrix(barricadeOBB), glm::vec3{0.85f, 0.88f, 0.92f}, true, false, false, barricadeOBB.center, glm::length(barricadeOBB.halfExtents)});
 
         for (int g = -20; g <= 20; g += 5)
         {
@@ -594,6 +800,8 @@ PreviewFrame ArenaScene::buildFrame(float alpha)
         glm::vec3{0.24f, 0.62f, 0.36f},
         debugOverlay_,
         true,
+        true,
+        false,
         false,
         glm::vec3{1.0f});
 
@@ -613,6 +821,8 @@ PreviewFrame ArenaScene::buildFrame(float alpha)
             enemyColor,
             debugOverlay_ && enemy.tank.alive(),
             false,
+            false,
+            isSelected,
             isSelected,
             enemyColor);
 
@@ -636,7 +846,7 @@ PreviewFrame ArenaScene::buildFrame(float alpha)
         const glm::mat4 coreDraw =
             glm::translate(glm::mat4{1.0f}, burst.origin + glm::vec3{0.0f, coreScale * 0.4f, 0.0f}) *
             glm::scale(glm::mat4{1.0f}, glm::vec3{coreScale});
-        frame.boxes.push_back({coreDraw, burstColor, false});
+        frame.boxes.push_back({coreDraw, burstColor, false, false, true, burst.origin, coreScale});
         appendGroundCircle(frame.lines, burst.origin, radius, burstColor, 20);
     }
 
@@ -647,7 +857,7 @@ PreviewFrame ArenaScene::buildFrame(float alpha)
         const glm::mat4 projDraw =
             glm::translate(glm::mat4{1.0f}, renderPos) *
             glm::scale(glm::mat4{1.0f}, glm::vec3{0.30f});
-        frame.boxes.push_back({projDraw, glm::vec3{0.96f, 0.14f, 0.12f}, false});
+        frame.boxes.push_back({projDraw, glm::vec3{0.96f, 0.14f, 0.12f}, false, false, true, renderPos, 0.30f});
     }
 
     return frame;
@@ -657,14 +867,13 @@ void runCp01UnitChecks()
 {
     std::println("=== [CP01 QA Unit Checks] ===");
 
-    // QA-02: 1/240s click -> 0 ticks (click retained), then 3/240s -> 2 ticks, total fire requests = 1
     {
         TimeManager tm{};
         InputBuffer input{};
         input.reset();
         tm.reset();
 
-        input.onMouseButton(0, 1); // GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS
+        input.onMouseButton(0, 1);
         tm.beginFrame(1.0f / 240.0f, 1.0f);
         int frame1Ticks = 0;
         int fireCount = 0;
@@ -697,7 +906,6 @@ void runCp01UnitChecks()
             fireCount);
     }
 
-    // QA-03: 1.0s split into 30 / 60 / 120 frames at scale 1.0 (120 ticks) and 0.25 (30 ticks)
     {
         const auto countTicks = [](int frames, float scale)
         {
@@ -735,7 +943,6 @@ void runCp01UnitChecks()
             s120);
     }
 
-    // QA-06: Single segment crossing two collinear thin target OBBs -> front hit once, back hit zero
     {
         TraceCollider front{};
         front.ownerId = 10;
@@ -775,7 +982,6 @@ void runCp02UnitChecks()
 {
     std::println("=== [CP02 QA Unit Checks] ===");
 
-    // QA-09: Height H and Radius R boundary checks for TrickshotController::canEnter
     {
         TrickshotController ctrl{};
         TrickshotConfig cfg{};

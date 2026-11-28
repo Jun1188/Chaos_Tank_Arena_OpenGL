@@ -44,9 +44,10 @@ struct TankSpec
     float trackHalfSpacing{0.813f};
 
     float moveSpeed{8.5f};
+    float boostSpeedMultiplier{2.15f};
     float turnSpeedRad{10.0f};
     float airControlAccel{5.5f};
-    float gravity{12.0f};
+    float gravity{15.5f};
     float manualAimSpeedRad{1.8f};
     float minPitchRad{-0.75f};
     float maxPitchRad{1.05f};
@@ -101,12 +102,15 @@ public:
     void applyDrive(
         float moveForwardInput,
         float moveRightInput,
+        bool boostActive,
         float dt,
         const RampSurface* ramp = nullptr,
         std::span<const OBB> solidObstacles = {},
         float arenaHalfExtent = 23.0f);
+    void resetHullToAim(const glm::vec3& aimForwardXZ);
     void triggerExplosionJump(const glm::vec3& horizontalDirXZ);
     void applyFireRecoil(const glm::vec3& fireForward);
+    void applyHitImpulse(const glm::vec3& hitPoint, const glm::vec3& impulseDir);
     void adjustManualAim(float turretTurnInput, float barrelPitchInput, float dt);
     void aimAt(const glm::vec3& worldTarget, bool syncPrev = false);
 
@@ -156,6 +160,21 @@ private:
     int hp_{100};
     float cooldownRemaining_{0.0f};
     bool tookOffThisTick_{false};
+    int airRecoilCount_{0};
+    bool groundRollActive_{false};
+    bool recoilSettleActive_{false};
+    float recoilSettleElapsed_{0.0f};
+    float recoilSettleDuration_{0.55f};
+    glm::quat recoilStartRot_{1.0f, 0.0f, 0.0f, 0.0f};
+    bool hullAlignActive_{false};
+    float hullAlignElapsed_{0.0f};
+    float hullAlignDuration_{0.24f};
+    float hullAlignStartYaw_{0.0f};
+    float hullAlignTargetYaw_{0.0f};
+    glm::quat hullAlignStartRot_{1.0f, 0.0f, 0.0f, 0.0f};
+    float driveBasisYaw_{0.0f};
+    glm::vec3 recoilSlideVelXZ_{0.0f};
+    float boostBlend_{0.0f};
     std::mt19937 rng_{std::random_device{}()};
 };
 } // namespace game

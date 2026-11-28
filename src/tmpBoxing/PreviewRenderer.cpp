@@ -49,9 +49,12 @@ bool PreviewRenderer::init()
         "framework/local/ComputerGraphics/ComputerGraphics/shaders/1_opengl_basics/projectionView.vs");
     const std::string fsPath = resolveRepoPathString(
         "framework/local/ComputerGraphics/ComputerGraphics/shaders/1_opengl_basics/uniformColor.fs");
+    const std::string transparentFsPath = resolveRepoPathString(
+        "framework/local/ComputerGraphics/ComputerGraphics/shaders/1_opengl_basics/transparentColor.fs");
     const std::string cubePath = resolveRepoPathString("assets/boxing/cube.obj");
 
     shader_ = std::make_unique<Shader>(vsPath, fsPath);
+    transparentShader_ = std::make_unique<Shader>(vsPath, transparentFsPath);
     cubeModel_ = std::make_unique<Model>(cubePath);
 
     tankModel_ = std::make_unique<SandTankModel>();
@@ -88,22 +91,50 @@ void PreviewRenderer::draw(const game::PreviewFrame& frame, const glm::mat4& vie
     if (!initialized_ || !shader_ || !cubeModel_)
         return;
 
-    if (tankModel_ && tankModel_->ready())
+    const bool ghostPassActive = (frame.zoomAlphaFade > 0.01f);
+    const float ghostAlpha = glm::mix(1.0f, 0.14f, glm::clamp(frame.zoomAlphaFade, 0.0f, 1.0f));
+    const bool tankGlbReady = (tankModel_ && tankModel_->ready());
+    auto& meshes = cubeModel_->Meshes();
+
+    // Camera-to-target depth check: only objects closer than the target in view depth become translucent.
+    const glm::vec3 camPos = glm::vec3(glm::inverse(view)[3]);
+    const glm::vec3 camFwd = glm::normalize(glm::vec3{-view[0][2], -view[1][2], -view[2][2]});
+    const float targetDepth = glm::dot(frame.zoomTargetPos - camPos, camFwd);
+    const auto isBetweenCamAndTarget = [&](const glm::vec3& center, float radius)
+    {
+        if (!ghostPassActive)
+            return false;
+        const float nearestDepth = glm::dot(center - camPos, camFwd) - radius;
+        return nearestDepth < (targetDepth - 0.35f);
+    };
+
+    // Pass 1: Opaque geometry (barrel, zoom target, floor, projectiles, and anything behind target depth).
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+
+    if (tankGlbReady)
     {
         for (const game::PreviewTankItem& tank : frame.tanks)
-            tankModel_->draw(tank.pose, tank.tint, view, projection);
+        {
+            const bool occludes = !tank.isZoomTarget && isBetweenCamAndTarget(tank.worldCenter, tank.boundingRadius);
+            if (!occludes)
+                tankModel_->draw(tank.pose, tank.tint, view, projection, 1.0f, TankRenderFilter::All);
+            else if (tank.isPlayer)
+                tankModel_->draw(tank.pose, tank.tint, view, projection, 1.0f, TankRenderFilter::BarrelOnly);
+        }
     }
 
     shader_->Bind();
     shader_->SetUniform("view", view);
     shader_->SetUniform("projection", projection);
 
-    auto& meshes = cubeModel_->Meshes();
     bool wireActive = false;
-
     for (const game::PreviewBoxItem& box : frame.boxes)
     {
-        if (box.tankFallback && tankModel_ && tankModel_->ready())
+        if (box.tankFallback && tankGlbReady)
+            continue;
+        const bool occludes = !box.keepOpaqueInZoom && isBetweenCamAndTarget(box.worldCenter, box.boundingRadius);
+        if (occludes)
             continue;
 
         if (box.wireframe != wireActive)
@@ -127,10 +158,81 @@ void PreviewRenderer::draw(const game::PreviewFrame& frame, const glm::mat4& vie
     }
 
     if (wireActive)
+    {
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        wireActive = false;
+    }
 
+    // Pass 2: Depth-filtered near-transparent alpha-blended pass for parts/props between camera & target.
+    if (ghostPassActive)
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+
+        if (tankGlbReady)
+        {
+            for (const game::PreviewTankItem& tank : frame.tanks)
+            {
+                const bool occludes = !tank.isZoomTarget && isBetweenCamAndTarget(tank.worldCenter, tank.boundingRadius);
+                if (!occludes)
+                    continue;
+                if (tank.isPlayer)
+                    tankModel_->draw(tank.pose, tank.tint, view, projection, ghostAlpha, TankRenderFilter::NonBarrelOnly);
+                else
+                    tankModel_->draw(tank.pose, tank.tint, view, projection, ghostAlpha, TankRenderFilter::All);
+            }
+        }
+
+        if (transparentShader_)
+        {
+            transparentShader_->Bind();
+            transparentShader_->SetUniform("view", view);
+            transparentShader_->SetUniform("projection", projection);
+
+            for (const game::PreviewBoxItem& box : frame.boxes)
+            {
+                if (box.tankFallback && tankGlbReady)
+                    continue;
+                const bool occludes = !box.keepOpaqueInZoom && isBetweenCamAndTarget(box.worldCenter, box.boundingRadius);
+                if (!occludes)
+                    continue;
+
+                if (box.wireframe != wireActive)
+                {
+                    glPolygonMode(GL_FRONT_AND_BACK, box.wireframe ? GL_LINE : GL_FILL);
+                    wireActive = box.wireframe;
+                }
+
+                transparentShader_->SetUniform("model", box.worldMatrix);
+                transparentShader_->SetUniform("a_Color", glm::vec4{box.color, ghostAlpha});
+
+                for (Mesh& mesh : meshes)
+                {
+                    mesh.Bind();
+                    glDrawElements(
+                        GL_TRIANGLES,
+                        static_cast<GLsizei>(mesh.m_Indices.size()),
+                        GL_UNSIGNED_INT,
+                        nullptr);
+                }
+            }
+        }
+
+        if (wireActive)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    // Pass 3: Debug lines and 2D reticle overlay.
     if (lineVao_ != 0)
     {
+        shader_->Bind();
+        shader_->SetUniform("view", view);
+        shader_->SetUniform("projection", projection);
+
         glBindVertexArray(lineVao_);
         glBindBuffer(GL_ARRAY_BUFFER, lineVbo_);
 
@@ -146,7 +248,7 @@ void PreviewRenderer::draw(const game::PreviewFrame& frame, const glm::mat4& vie
             }
         }
 
-        // Temporary 2D NDC click-prompt & reticle overlay for CP02 trickshot AimReady state.
+        // 2D NDC crosshair & click-prompt overlay during zoom-in AimReady state.
         if (frame.trickshot.showClickIcon)
         {
             const GLboolean depthWasEnabled = glIsEnabled(GL_DEPTH_TEST);
@@ -160,19 +262,16 @@ void PreviewRenderer::draw(const game::PreviewFrame& frame, const glm::mat4& vie
             const glm::vec3 reticleColor{0.20f, 1.0f, 0.90f};
             const glm::vec3 iconColor{1.0f, 0.92f, 0.25f};
 
-            // Center crosshair and aim frame.
             drawLine2D(*shader_, {-0.045f, 0.0f}, {-0.015f, 0.0f}, reticleColor);
             drawLine2D(*shader_, {0.015f, 0.0f}, {0.045f, 0.0f}, reticleColor);
             drawLine2D(*shader_, {0.0f, -0.075f}, {0.0f, -0.025f}, reticleColor);
             drawLine2D(*shader_, {0.0f, 0.025f}, {0.0f, 0.075f}, reticleColor);
             drawRect2D(*shader_, {0.0f, 0.0f}, {0.14f, 0.20f}, reticleColor);
 
-            // Stylized LMB click icon below center.
             const glm::vec2 iconCenter{0.0f, -0.45f};
             drawRect2D(*shader_, iconCenter, {0.045f, 0.085f}, iconColor);
             drawLine2D(*shader_, {iconCenter.x - 0.045f, iconCenter.y + 0.01f}, {iconCenter.x + 0.045f, iconCenter.y + 0.01f}, iconColor);
             drawLine2D(*shader_, {iconCenter.x, iconCenter.y + 0.01f}, {iconCenter.x, iconCenter.y + 0.085f}, iconColor);
-            // Highlight left button inside mouse outline.
             drawRect2D(*shader_, {iconCenter.x - 0.022f, iconCenter.y + 0.047f}, {0.016f, 0.028f}, glm::vec3{1.0f, 0.35f, 0.20f});
 
             if (depthWasEnabled)
@@ -197,6 +296,7 @@ void PreviewRenderer::shutdown()
     }
     tankModel_.reset();
     cubeModel_.reset();
+    transparentShader_.reset();
     shader_.reset();
     initialized_ = false;
 }

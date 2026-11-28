@@ -28,9 +28,12 @@ struct RuntimeState
     game::PresentedView presentedView{};
 
     glm::vec3 quarterAnchorPos{0.0f, 0.0f, 10.0f};
-    glm::vec3 quarterHeadingXZ{0.0f, 0.0f, -1.0f};
-    glm::vec3 mainCamPos{5.0f, 11.5f, 22.0f};
-    glm::vec3 mainCamLookAt{0.0f, 1.0f, 6.5f};
+    float midQuarterYaw{0.0f};
+    float currentQuarterYaw{0.0f};
+    float smoothedAirHeight{0.0f};
+    float smoothedMotionSpread{0.0f};
+    glm::vec3 mainCamPos{1.6f, 10.6f, 23.5f};
+    glm::vec3 mainCamLookAt{0.0f, 0.9f, 6.2f};
     float mainCamFovDeg{45.0f};
 
     bool middleMouseHeld{false};
@@ -44,26 +47,66 @@ struct RuntimeState
 
 RuntimeState g_Runtime{};
 
-void computeQuarterViewTarget(
-    const glm::vec3& playerPos,
-    const glm::vec3& headingXZ,
+float wrapAnglePiMain(float angle)
+{
+    constexpr float kPi = 3.14159265358979323846f;
+    while (angle > kPi)
+        angle -= 2.0f * kPi;
+    while (angle < -kPi)
+        angle += 2.0f * kPi;
+    return angle;
+}
+
+void computeAimQuarterViewTarget(
+    const glm::vec3& anchorPos,
+    const game::AimCameraContext& ctx,
+    float camYaw,
+    float smoothedAirHeight,
+    float smoothedSpread,
     glm::vec3& outPos,
     glm::vec3& outLookAt)
 {
-    const glm::vec3 fwd = (glm::length(headingXZ) > 1e-4f) ? glm::normalize(headingXZ) : glm::vec3{0.0f, 0.0f, -1.0f};
+    const glm::vec3 fwd{-std::sin(camYaw), 0.0f, -std::cos(camYaw)};
     const glm::vec3 right = glm::normalize(glm::cross(fwd, glm::vec3{0.0f, 1.0f, 0.0f}));
-    outPos = playerPos - fwd * 11.5f + right * 5.2f + glm::vec3{0.0f, 11.2f, 0.0f};
-    outLookAt = playerPos + fwd * 3.5f + glm::vec3{0.0f, 1.0f, 0.0f};
+
+    const glm::vec3 toAim = ctx.aimPoint - anchorPos;
+    const float aimDistXZ = std::clamp(glm::length(glm::vec2{toAim.x, toAim.z}), 4.0f, 24.0f);
+    const float leadDist = std::clamp(aimDistXZ * 0.20f, 1.4f, 3.8f);
+
+    const float pullback = 13.5f + smoothedAirHeight * 0.42f + smoothedSpread;
+    const float camHeight = 10.6f + smoothedAirHeight * 0.32f + smoothedSpread * 0.35f;
+
+    outPos = anchorPos - fwd * pullback + right * 1.6f + glm::vec3{0.0f, camHeight, 0.0f};
+    outPos.y = std::max(outPos.y, 3.0f);
+
+    const glm::vec3 subtleTankOffset = (ctx.playerPos - anchorPos) * 0.18f;
+    const float baseFocusY = glm::mix(anchorPos.y, ctx.playerPos.y, 0.25f) + 0.90f;
+    const float airAimWeight = std::clamp(smoothedAirHeight / 7.0f, 0.0f, 0.38f);
+    const float lookY = glm::mix(baseFocusY, ctx.aimPoint.y, airAimWeight);
+
+    outLookAt = glm::vec3{
+        anchorPos.x + subtleTankOffset.x + fwd.x * leadDist,
+        lookY,
+        anchorPos.z + subtleTankOffset.z + fwd.z * leadDist};
 }
 
 void resetArenaCamera(Camera& cam)
 {
-    g_Runtime.quarterAnchorPos = g_Runtime.scene.player().position();
-    g_Runtime.quarterHeadingXZ = glm::vec3{0.0f, 0.0f, -1.0f};
+    const game::AimCameraContext ctx = g_Runtime.scene.cameraAimContext(0.0f);
+    g_Runtime.quarterAnchorPos = ctx.playerPos;
+    const glm::vec2 toAimXZ{ctx.aimPoint.x - ctx.playerPos.x, ctx.aimPoint.z - ctx.playerPos.z};
+    const float initYaw = (glm::length(toAimXZ) > 1e-3f) ? std::atan2(-toAimXZ.x, -toAimXZ.y) : 0.0f;
+    g_Runtime.midQuarterYaw = initYaw;
+    g_Runtime.currentQuarterYaw = initYaw;
+    g_Runtime.smoothedAirHeight = 0.0f;
+    g_Runtime.smoothedMotionSpread = 0.0f;
     g_Runtime.mainCamFovDeg = 45.0f;
-    computeQuarterViewTarget(
+    computeAimQuarterViewTarget(
         g_Runtime.quarterAnchorPos,
-        g_Runtime.quarterHeadingXZ,
+        ctx,
+        g_Runtime.currentQuarterYaw,
+        0.0f,
+        0.0f,
         g_Runtime.mainCamPos,
         g_Runtime.mainCamLookAt);
     cam.PlaceAt(g_Runtime.mainCamPos);
@@ -78,9 +121,7 @@ std::string_view trickshotStateLabel(game::TrickshotState state)
     case game::TrickshotState::TransitionIn:
         return "ZOOM_IN";
     case game::TrickshotState::AimReady:
-        return "CLICK_NOW";
-    case game::TrickshotState::ShotFired:
-        return "FIRED";
+        return "ZOOM_AIM";
     case game::TrickshotState::TransitionOut:
         return "RETURN";
     default:
@@ -106,6 +147,7 @@ void Application::OnInit()
     AppendCamera(g_Runtime.mainCamPos, glm::vec3{0.0f, 1.0f, 0.0f}, g_Runtime.mainCamFovDeg, -90.0f, -35.0f);
     mouseActiveCamera = 0;
     glfwSetInputMode(m_Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    glfwSetInputMode(m_Window, GLFW_LOCK_KEY_MODS, GLFW_TRUE);
 
     double cx = 0.0;
     double cy = 0.0;
@@ -121,10 +163,10 @@ void Application::OnInit()
     g_Runtime.latestFrame = g_Runtime.scene.buildFrame(0.0f);
 
     std::println(
-        "[CP02 Controls] WASD: 4-Way Body Move | Mouse: Aim Turret/Barrel | LMB: Fire | RMB: Focus Target | B: Explosion Jump & Back-View Slow Toggle | Arrows: Manual Turret/Barrel | F1: Debug | F2: Unit QA | F3: QA-12 Despawn Focus | R: Reset | ESC: Quit");
+        "[CP02 Controls] WASD: 4-Way Move | r: Align Hull Pose & Forward Basis to Current Aim | R (Shift+R/F5): Scene Reset | Shift: Boost | Hold RMB: Zoom+Slow -> LMB: Fire | Hold LMB >=1.2s: Charge Zoom | B: Explosion Jump | F1: Debug | F2: QA | F3: QA-12 | ESC: Quit");
 }
 
-void Application::OnKeyEvent(int key, int action, int /*mods*/)
+void Application::OnKeyEvent(int key, int action, int mods)
 {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
     {
@@ -139,7 +181,7 @@ void Application::OnKeyEvent(int key, int action, int /*mods*/)
         return;
     }
 
-    g_Runtime.input.onKey(key, action);
+    g_Runtime.input.onKey(key, action, mods);
 }
 
 void Application::OnMouseButtonEvent(int button, int action, int /*mods*/)
@@ -206,48 +248,97 @@ void Application::Update()
     const float renderAlpha = g_Runtime.timeManager.alpha();
     const float clampedRawDt = std::clamp(deltaTime, 0.0f, 0.1f);
 
-    // Calm, low-sensitivity quarter-view main camera with position dead-zone and lazy heading drift.
-    const glm::vec3 playerRenderPos = g_Runtime.scene.playerInterpolatedPosition(renderAlpha);
-    const glm::vec3 playerForwardXZ = g_Runtime.scene.playerInterpolatedForwardXZ(renderAlpha);
+    // Desensitized, two-stage smoothed quarter-view camera roughly oriented toward current aim target/direction
+    // while accounting for WASD, B jump, and recoil displacement/sightline.
+    const game::AimCameraContext camCtx = g_Runtime.scene.cameraAimContext(renderAlpha);
 
-    const glm::vec3 anchorDelta{
-        playerRenderPos.x - g_Runtime.quarterAnchorPos.x,
-        0.0f,
-        playerRenderPos.z - g_Runtime.quarterAnchorPos.z};
-    constexpr float kDeadZoneRadius = 2.6f;
-    const float anchorDist = glm::length(anchorDelta);
-    if (anchorDist > kDeadZoneRadius)
-    {
-        const glm::vec3 excessTarget = playerRenderPos - (anchorDelta / anchorDist) * kDeadZoneRadius;
-        const float anchorBlend = 1.0f - std::exp(-2.2f * clampedRawDt);
-        g_Runtime.quarterAnchorPos.x = glm::mix(g_Runtime.quarterAnchorPos.x, excessTarget.x, anchorBlend);
-        g_Runtime.quarterAnchorPos.z = glm::mix(g_Runtime.quarterAnchorPos.z, excessTarget.z, anchorBlend);
-    }
+    const glm::vec2 deltaXZ{
+        camCtx.playerPos.x - g_Runtime.quarterAnchorPos.x,
+        camCtx.playerPos.z - g_Runtime.quarterAnchorPos.z};
+    const float distXZ = glm::length(deltaXZ);
+    const float deadzoneT = std::clamp((distXZ - 1.8f) / 4.2f, 0.0f, 1.0f);
+    const float smoothDeadzone = deadzoneT * deadzoneT * (3.0f - 2.0f * deadzoneT);
+    const float outerLeashT = std::clamp((distXZ - 5.5f) / 3.5f, 0.0f, 1.0f);
+    const float anchorHorizRate = glm::mix(0.32f, 2.25f, smoothDeadzone) + outerLeashT * 2.0f;
+    const float anchorHorizBlend = 1.0f - std::exp(-anchorHorizRate * clampedRawDt);
+    g_Runtime.quarterAnchorPos.x = glm::mix(g_Runtime.quarterAnchorPos.x, camCtx.playerPos.x, anchorHorizBlend);
+    g_Runtime.quarterAnchorPos.z = glm::mix(g_Runtime.quarterAnchorPos.z, camCtx.playerPos.z, anchorHorizBlend);
+
+    // Filter out subtle ground recoil tilt bobbing (< 0.45m) while smoothly tracking airborne B/ramp elevation.
+    const float rawDeltaY = camCtx.playerPos.y - g_Runtime.quarterAnchorPos.y;
+    const float verticalTargetY = (!camCtx.airborne && std::abs(rawDeltaY) < 0.45f)
+        ? g_Runtime.quarterAnchorPos.y
+        : (camCtx.airborne ? (camCtx.playerPos.y * 0.62f) : camCtx.playerPos.y);
+    const float anchorVertRate = camCtx.airborne ? 1.55f : 2.10f;
     g_Runtime.quarterAnchorPos.y = glm::mix(
         g_Runtime.quarterAnchorPos.y,
-        playerRenderPos.y * 0.25f,
-        1.0f - std::exp(-1.5f * clampedRawDt));
+        verticalTargetY,
+        1.0f - std::exp(-anchorVertRate * clampedRawDt));
 
-    const float headingDot = glm::dot(g_Runtime.quarterHeadingXZ, playerForwardXZ);
-    if (headingDot < 0.70f)
+    const float targetAirH = camCtx.airborne ? camCtx.heightAboveGround : 0.0f;
+    const float airSmoothRate = (targetAirH > g_Runtime.smoothedAirHeight) ? 1.75f : 2.35f;
+    g_Runtime.smoothedAirHeight = glm::mix(
+        g_Runtime.smoothedAirHeight,
+        targetAirH,
+        1.0f - std::exp(-airSmoothRate * clampedRawDt));
+
+    const float targetSpread = std::clamp((distXZ - 1.2f) * 0.45f, 0.0f, 2.2f);
+    g_Runtime.smoothedMotionSpread = glm::mix(
+        g_Runtime.smoothedMotionSpread,
+        targetSpread,
+        1.0f - std::exp(-1.90f * clampedRawDt));
+
+    const glm::vec2 aimVecXZ{
+        camCtx.aimPoint.x - g_Runtime.quarterAnchorPos.x,
+        camCtx.aimPoint.z - g_Runtime.quarterAnchorPos.z};
+    if (glm::length(aimVecXZ) > 1.5f)
     {
-        const float headingBlend = 1.0f - std::exp(-0.65f * clampedRawDt);
-        const glm::vec3 mixedHeading = glm::mix(g_Runtime.quarterHeadingXZ, playerForwardXZ, headingBlend);
-        if (glm::length(mixedHeading) > 1e-4f)
-            g_Runtime.quarterHeadingXZ = glm::normalize(mixedHeading);
+        const float rawAimYaw = std::atan2(-aimVecXZ.x, -aimVecXZ.y);
+        const float diff = wrapAnglePiMain(rawAimYaw - g_Runtime.currentQuarterYaw);
+        constexpr float kComfortConeRad = 0.22f;
+        float yawDrive = 0.0f;
+        if (std::abs(diff) <= kComfortConeRad)
+        {
+            yawDrive = diff * 0.16f;
+        }
+        else
+        {
+            const float excess = diff - std::copysign(kComfortConeRad, diff);
+            yawDrive = std::copysign(kComfortConeRad * 0.16f, diff) + excess * 0.78f;
+        }
+
+        const float desiredYaw = wrapAnglePiMain(g_Runtime.currentQuarterYaw + yawDrive);
+        const float midDiff = wrapAnglePiMain(desiredYaw - g_Runtime.midQuarterYaw);
+        g_Runtime.midQuarterYaw = wrapAnglePiMain(
+            g_Runtime.midQuarterYaw + midDiff * (1.0f - std::exp(-1.25f * clampedRawDt)));
     }
+
+    const float finalYawDiff = wrapAnglePiMain(g_Runtime.midQuarterYaw - g_Runtime.currentQuarterYaw);
+    g_Runtime.currentQuarterYaw = wrapAnglePiMain(
+        g_Runtime.currentQuarterYaw + finalYawDiff * (1.0f - std::exp(-1.75f * clampedRawDt)));
 
     glm::vec3 targetMainPos{};
     glm::vec3 targetMainLookAt{};
-    computeQuarterViewTarget(g_Runtime.quarterAnchorPos, g_Runtime.quarterHeadingXZ, targetMainPos, targetMainLookAt);
-    const float camFollowBlend = 1.0f - std::exp(-2.4f * clampedRawDt);
-    g_Runtime.mainCamPos = glm::mix(g_Runtime.mainCamPos, targetMainPos, camFollowBlend);
-    g_Runtime.mainCamLookAt = glm::mix(g_Runtime.mainCamLookAt, targetMainLookAt, camFollowBlend);
+    computeAimQuarterViewTarget(
+        g_Runtime.quarterAnchorPos,
+        camCtx,
+        g_Runtime.currentQuarterYaw,
+        g_Runtime.smoothedAirHeight,
+        g_Runtime.smoothedMotionSpread,
+        targetMainPos,
+        targetMainLookAt);
+
+    const float posBlend = 1.0f - std::exp(-2.35f * clampedRawDt);
+    const float lookBlend = 1.0f - std::exp(-2.75f * clampedRawDt);
+    g_Runtime.mainCamPos = glm::mix(g_Runtime.mainCamPos, targetMainPos, posBlend);
+    g_Runtime.mainCamLookAt = glm::mix(g_Runtime.mainCamLookAt, targetMainLookAt, lookBlend);
 
     g_Runtime.scene.updateRealTime(
         clampedRawDt,
         renderAlpha,
         rawMouseDelta,
+        g_Runtime.input.isRmbHeld(),
+        g_Runtime.input.isLmbHeld(),
         g_Runtime.mainCamPos,
         g_Runtime.mainCamLookAt,
         g_Runtime.mainCamFovDeg);
@@ -274,7 +365,7 @@ void Application::Update()
 
     const auto& ts = g_Runtime.latestFrame.trickshot;
     std::string nextTitle = std::format(
-        "Chaos Tank Arena [CP02] | Focus: {} | Trickshot: {} ({:.2f}x) | FOV: {:.0f} | Target HP: {}/{} | B:BoomBackView R:Reset",
+        "Chaos Tank Arena [CP02] | Focus: {} | State: {} ({:.2f}x) | FOV: {:.0f} | Target HP: {}/{} | B:Jump RMB:Zoom LMB:Fire r:Hull R:Reset",
         ts.selectedTargetId == game::kInvalidEntityId ? std::string{"None"} : std::format("ID={}", ts.selectedTargetId),
         trickshotStateLabel(ts.state),
         ts.timeScale,

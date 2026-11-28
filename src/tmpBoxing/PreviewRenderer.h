@@ -27,6 +27,7 @@ public:
 
 private:
     std::unique_ptr<Shader> shader_{};
+    std::unique_ptr<Shader> transparentShader_{};
     std::unique_ptr<Model> cubeModel_{};
     std::unique_ptr<SandTankModel> tankModel_{};
     unsigned int lineVao_{0};

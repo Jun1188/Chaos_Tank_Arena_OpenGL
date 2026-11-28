@@ -191,7 +191,8 @@ void SandTankModel::appendNode(const aiNode& source, const aiScene& scene, int p
 }
 
 void SandTankModel::draw(const game::TankPose& pose, const glm::vec3& tint,
-    const glm::mat4& view, const glm::mat4& projection)
+    const glm::mat4& view, const glm::mat4& projection,
+    float alpha, TankRenderFilter filter)
 {
     if (!ready())
         return;
@@ -200,6 +201,10 @@ void SandTankModel::draw(const game::TankPose& pose, const glm::vec3& tint,
     glUniformMatrix4fv(glGetUniformLocation(program_, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
     const int modelLocation = glGetUniformLocation(program_, "model");
     const int colorLocation = glGetUniformLocation(program_, "objectColor");
+    const int alphaLocation = glGetUniformLocation(program_, "objectAlpha");
+    if (alphaLocation >= 0)
+        glUniform1f(alphaLocation, alpha);
+
     for (std::size_t i = 0; i < nodes_.size(); ++i)
     {
         Node& node = nodes_[i];
@@ -213,6 +218,13 @@ void SandTankModel::draw(const game::TankPose& pose, const glm::vec3& tint,
         else if (node.name.starts_with("RoadWheel_R_"))
             world *= glm::rotate(glm::mat4{1.0f}, pose.wheelSpinRad.y, glm::vec3{1.0f, 0.0f, 0.0f});
         worlds_[i] = world;
+
+        const bool isBarrel = (node.name == "Barrel");
+        if (filter == TankRenderFilter::BarrelOnly && !isBarrel)
+            continue;
+        if (filter == TankRenderFilter::NonBarrelOnly && isBarrel)
+            continue;
+
         glUniformMatrix4fv(modelLocation, 1, GL_FALSE, glm::value_ptr(world));
         for (Part& part : node.parts)
         {

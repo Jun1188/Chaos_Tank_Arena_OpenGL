@@ -11,6 +11,13 @@ struct aiScene;
 
 namespace tmpBoxing
 {
+enum class TankRenderFilter : std::uint8_t
+{
+    All = 0,
+    BarrelOnly,
+    NonBarrelOnly,
+};
+
 // Rigid GLB preview adapter. GPU resources stay outside the game module.
 class SandTankModel
 {
@@ -22,7 +29,8 @@ public:
     bool load(const std::string& path, const std::string& vertexPath, const std::string& fragmentPath);
     bool ready() const { return program_ != 0; }
     void draw(const game::TankPose& pose, const glm::vec3& tint,
-        const glm::mat4& view, const glm::mat4& projection);
+        const glm::mat4& view, const glm::mat4& projection,
+        float alpha = 1.0f, TankRenderFilter filter = TankRenderFilter::All);
 
 private:
     struct Part
